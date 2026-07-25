@@ -33,7 +33,18 @@ verified against live Steam, the download path only against fakes.
 | `instance.py` | Done |
 | `runner.py` | Done |
 | `cli.py` | Done |
-| `api.py` | Deferred (spec §11) |
+| `api.py` | Done |
+
+## Web API
+
+```bash
+dzsm serve
+```
+
+Serves a read-only dashboard at `/` and a JSON API under `/api`. Binds `127.0.0.1` by
+default; binding anywhere else requires a token, since these routes can start, stop, and
+delete things. Set one with `DZSM_API_TOKEN` and send it as `X-DZSM-Token` or
+`Authorization: Bearer`. Reads stay open either way. Interactive docs at `/docs`.
 
 ## First run
 

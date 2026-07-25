@@ -145,7 +145,24 @@ manifest, no buildid, or no executable, regardless of exit code.
 config choice should not be silently overridden. `dzsm server update` says so when it
 applies.
 
-Still stubbed: `api.py` (deferred until the CLI settles, spec §11).
+**The web API is live** (`dzsm serve`). It is deliberately thin — every route calls the
+same functions the CLI does, so the two can never disagree about what "running" or
+"pinned" means. Do not let it grow its own model of an instance or a version.
+
+Access model, which is the part to not weaken:
+
+- Reads are open; they disclose nothing secret.
+- Writes require the token from `api.token_env` when one is set, compared with
+  `secrets.compare_digest`.
+- With no token, writes are still allowed — because `serve` **refuses to bind a
+  non-loopback address without one**. That guard is what makes the whole model hold; if
+  you ever make writes open on a bound interface, the refusal must go with it.
+- `tests/test_api.py::test_every_write_route_requires_the_token` lists every write route
+  explicitly. A new one added without the dependency fails that test rather than shipping
+  unauthenticated. Add to the list when you add a route.
+
+Downloads return 202 with a job id; jobs are in-memory and deliberately not persisted, as
+a "running" job restored from disk after a restart would be a lie.
 
 **`server_app_path` is interim.** Because `update_server_app` is a stub, dzsm cannot
 download appid 223350, so instances run against a Steam-installed server pointed at by

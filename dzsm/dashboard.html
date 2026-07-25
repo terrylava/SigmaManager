@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>dzsm</title>
+<style>
+ body { font: 14px system-ui, sans-serif; margin: 2rem; background: #111; color: #ddd }
+ h1 { font-size: 1.2rem; margin: 0 0 1.5rem }
+ h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .05em;
+      color: #888; margin: 2rem 0 .5rem }
+ table { border-collapse: collapse; width: 100% }
+ td, th { text-align: left; padding: .35rem .8rem .35rem 0; border-bottom: 1px solid #262626 }
+ th { color: #888; font-weight: 500 }
+ .run { color: #4ade80 } .stop { color: #777 } .warn { color: #fbbf24 }
+ code { color: #93c5fd }
+ .note { color: #666; margin-top: 2rem; font-size: .85rem }
+</style>
+</head>
+<body>
+<h1>dzsm</h1>
+<div id="c">loading&hellip;</div>
+<p class="note">
+  Read-only view, refreshing every 10s. Writes go through the API with a token, or the CLI.
+</p>
+<script>
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const mib = b => (b / 1048576).toFixed(1) + ' MiB';
+const age = d => d == null ? '?' : d.toFixed(1) + 'd';
+
+function instanceRow(i) {
+  const pins = Object.entries(i.pins).map(([k, v]) => k + '=' + v).join(', ') || '—';
+  const state = i.running ? 'running' : 'stopped';
+  return '<tr>'
+    + '<td>' + esc(i.name)
+    + '<td class="' + (i.running ? 'run' : 'stop') + '">' + state
+    + '<td>' + i.port
+    + '<td><code>' + esc(pins) + '</code>'
+    + '<td>' + esc(i.next_restart || 'no schedule')
+    + '</tr>';
+}
+
+function versionRow(v) {
+  const use = v.in_use
+    ? '<span class="run">in use by ' + esc(v.pinned_by.join(', ')) + '</span>'
+    : '<span class="warn">unused</span>';
+  const missing = v.exists ? '' : ' <span class="warn">MISSING</span>';
+  return '<tr>'
+    + '<td>' + esc(v.mod_name || v.workshop_id)
+    + '<td><code>' + v.version + '</code>'
+    + '<td>' + mib(v.size_bytes)
+    + '<td>' + age(v.age_days)
+    + '<td>' + use + missing
+    + '</tr>';
+}
+
+async function load() {
+  try {
+    const [inst, vers, srv] = await Promise.all([
+      fetch('api/instances').then(r => r.json()),
+      fetch('api/versions').then(r => r.json()),
+      fetch('api/server').then(r => r.json()),
+    ]);
+
+    let h = '<h2>Instances</h2><table>'
+      + '<tr><th>Name<th>State<th>Port<th>Pinned<th>Next restart</tr>';
+    h += inst.map(instanceRow).join('');
+    if (!inst.length) h += '<tr><td colspan="5">none configured</tr>';
+
+    h += '</table><h2>Cached versions</h2><table>'
+      + '<tr><th>Mod<th>Version<th>Size<th>Age<th>Status</tr>';
+    h += vers.map(versionRow).join('');
+    if (!vers.length) h += '<tr><td colspan="5">nothing cached</tr>';
+
+    h += '</table><h2>Server app</h2><table><tr><th>Build<th></tr>';
+    h += srv.builds.map(b =>
+      '<tr><td><code>' + esc(b) + '</code><td>' + (b === srv.active ? 'active' : '') + '</tr>'
+    ).join('');
+    if (!srv.builds.length) h += '<tr><td colspan="2">none downloaded</tr>';
+    h += '</table>';
+
+    if (srv.server_app_path) {
+      h += '<p class="note">Instances use <code>' + esc(srv.server_app_path) + '</code></p>';
+    }
+    document.getElementById('c').innerHTML = h;
+  } catch (e) {
+    document.getElementById('c').textContent = 'failed to load: ' + e;
+  }
+}
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

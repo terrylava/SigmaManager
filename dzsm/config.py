@@ -72,6 +72,25 @@ class SteamConfig(BaseModel):
         return os.environ.get(self.password_env)
 
 
+class ApiConfig(BaseModel):
+    """Web API settings (spec §10, §11).
+
+    Loopback by default. `dzsm serve` refuses to bind a non-loopback address unless a
+    token is configured — this API can start, stop, and delete things, and binding it to
+    0.0.0.0 unauthenticated would hand that to anyone who can reach the port.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 8080
+    # Name of the env var holding the API token. Like the Steam password, the token
+    # itself is never in config.
+    token_env: str = "DZSM_API_TOKEN"  # noqa: S105 — a var name, not a secret
+
+    def token(self) -> str | None:
+        """The configured token, or None when unset."""
+        return os.environ.get(self.token_env) or None
+
+
 class InstanceConfig(BaseModel):
     """One server instance."""
 
@@ -95,6 +114,7 @@ class Config(BaseModel):
     steam: SteamConfig
     mods: dict[str, Mod] = Field(default_factory=dict)
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
+    api: ApiConfig = Field(default_factory=ApiConfig)
     # Optional retention window, in days. None (the default) means nothing is ever
     # deleted automatically — versions accumulate until someone removes one. Setting a
     # number opts in to automatic pruning of versions that are unused, not the newest for

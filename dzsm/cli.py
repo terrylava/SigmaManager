@@ -6,6 +6,7 @@ still stubs — they are blocked on verification item #1 in spec §5.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from pathlib import Path
 from typing import Annotated, NoReturn, Optional
@@ -132,6 +133,70 @@ def login(
         _fail(exc)
 
     typer.secho(f"logged in as {cfg.steam.username}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def serve(
+    config_path: ConfigPath = Path("config.toml"),
+    host: Annotated[
+        Optional[str],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Option("--host", help="Override api.host."),
+    ] = None,
+    port: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option("--port", help="Override api.port."),
+    ] = None,
+) -> None:
+    """Run the web API and dashboard.
+
+    Binds loopback by default. Binding anywhere else requires a token, because these
+    routes can start, stop, and delete things.
+    """
+    cfg = _load_config(config_path)
+    bind_host = host or cfg.api.host
+    bind_port = port or cfg.api.port
+
+    if not _is_loopback(bind_host) and cfg.api.token() is None:
+        _fail(
+            ValueError(
+                f"refusing to bind {bind_host} without a token: this API can start, "
+                f"stop, and delete things, and anyone able to reach the port could do "
+                f"so. Set {cfg.api.token_env} in the environment, or bind 127.0.0.1."
+            )
+        )
+
+    try:
+        import uvicorn
+
+        from dzsm.api import create_app
+    except ImportError as exc:
+        _fail(
+            ImportError(
+                f"the web extra is not installed: {exc}. Install it with "
+                f'pip install "dzsm[web]"'
+            )
+        )
+
+    if cfg.api.token() is None:
+        typer.secho(
+            f"no token set ({cfg.api.token_env} is unset) — writes are unauthenticated, "
+            f"which is why this is bound to {bind_host}",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo(f"http://{bind_host}:{bind_port}")
+    uvicorn.run(create_app(config_path), host=bind_host, port=bind_port, log_level="info")
+
+
+def _is_loopback(host: str) -> bool:
+    """True for addresses only reachable from this machine."""
+    if host in {"localhost", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        # A hostname we cannot resolve to a literal. Treat as non-loopback: the safe
+        # assumption is that it is reachable.
+        return False
 
 
 @mods_app.command("check")
