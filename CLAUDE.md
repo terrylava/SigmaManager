@@ -148,9 +148,21 @@ The version identity is Steam's `buildid` from `appmanifest_223350.acf`, the ser
 equivalent of a mod's `time_updated`. Verification refuses a run that produced no
 manifest, no buildid, or no executable, regardless of exit code.
 
-`config.server_app_path`, when set, still wins over the managed build — an explicit
-config choice should not be silently overridden. `dzsm server update` says so when it
-applies.
+**Instances select their build.** `server_build` pins one to a specific downloaded build;
+unset means the newest. Resolution is instance pin → `config.server_app_path` → newest
+downloaded, and the instance pin beats the global external path on purpose (more specific
+intent). The choice activates at start and lands in `state.server_builds`, exactly like
+mod versions — a new build never takes effect under a running server.
+
+**`isolated_server = true`** gives an instance a private copy of its build at
+`instances/<name>/server/`, so its own `keys/` and mission files. Without it, instances
+sharing a build share that build's key set. The copy is keyed by a `.dzsm-build` marker so
+an unchanged build never triggers a multi-GB recopy; `--refresh-server` forces one, which
+is the only way to pick up changes to an `external` install since dzsm cannot detect them.
+Copying happens only with the instance stopped.
+
+Disk is explicitly the secondary concern here — managing many servers, mods, and versions
+comes first. Do not "optimize" isolation or the version cache away.
 
 **The web API is live** (`dzsm serve`). It is deliberately thin — every route calls the
 same functions the CLI does, so the two can never disagree about what "running" or

@@ -15,7 +15,6 @@ import pytest
 
 from dzsm.config import Config, InstanceConfig, WorkshopMod
 from dzsm.instance import ensure_layout, sync_keys
-from dzsm.state import State
 
 WORKSHOP_ID = 1559212036
 VERSION = 1721005200
@@ -45,15 +44,19 @@ def _mod_with_keys(ready: Config, *names: str, directory: str = "keys") -> Path:
     return path
 
 
-def _server_keys(ready: Config) -> Path:
+def _server_dir(ready: Config) -> Path:
     assert ready.server_app_path is not None
-    return ready.server_app_path / "keys"
+    return ready.server_app_path
+
+
+def _server_keys(ready: Config) -> Path:
+    return _server_dir(ready) / "keys"
 
 
 def test_keys_land_in_the_server_directory(ready: Config) -> None:
     mod = _mod_with_keys(ready, "Jacob_Mango_V3.bikey")
 
-    added = sync_keys(ready, State(), "chernarus", [mod])
+    added = sync_keys(_server_dir(ready), "chernarus", [mod])
 
     assert (_server_keys(ready) / "Jacob_Mango_V3.bikey").is_file()
     assert added == [_server_keys(ready) / "Jacob_Mango_V3.bikey"]
@@ -62,7 +65,7 @@ def test_keys_land_in_the_server_directory(ready: Config) -> None:
 def test_not_in_the_instance_directory(ready: Config) -> None:
     mod = _mod_with_keys(ready, "Jacob_Mango_V3.bikey")
 
-    sync_keys(ready, State(), "chernarus", [mod])
+    sync_keys(_server_dir(ready), "chernarus", [mod])
 
     assert not (ready.instance_dir("chernarus") / "keys").exists()
 
@@ -71,7 +74,7 @@ def test_uppercase_keys_directory_is_found(ready: Config) -> None:
     """Mods are inconsistent about the casing."""
     mod = _mod_with_keys(ready, "Some.bikey", directory="Keys")
 
-    sync_keys(ready, State(), "chernarus", [mod])
+    sync_keys(_server_dir(ready), "chernarus", [mod])
 
     assert (_server_keys(ready) / "Some.bikey").is_file()
 
@@ -79,7 +82,7 @@ def test_uppercase_keys_directory_is_found(ready: Config) -> None:
 def test_multiple_keys_from_one_mod(ready: Config) -> None:
     mod = _mod_with_keys(ready, "a.bikey", "b.bikey")
 
-    added = sync_keys(ready, State(), "chernarus", [mod])
+    added = sync_keys(_server_dir(ready), "chernarus", [mod])
 
     assert len(added) == 2
 
@@ -91,7 +94,7 @@ def test_an_existing_key_is_never_overwritten(ready: Config) -> None:
     destination.mkdir(parents=True)
     (destination / "shared.bikey").write_bytes(b"original-and-possibly-open")
 
-    added = sync_keys(ready, State(), "chernarus", [mod])
+    added = sync_keys(_server_dir(ready), "chernarus", [mod])
 
     assert added == []
     assert (destination / "shared.bikey").read_bytes() == b"original-and-possibly-open"
@@ -105,7 +108,7 @@ def test_existing_keys_from_other_mods_are_kept(ready: Config) -> None:
     destination.mkdir(parents=True)
     (destination / "someone_elses.bikey").write_bytes(b"keep me")
 
-    sync_keys(ready, State(), "chernarus", [mod])
+    sync_keys(_server_dir(ready), "chernarus", [mod])
 
     assert (destination / "someone_elses.bikey").exists()
     assert (destination / "new.bikey").exists()
@@ -115,11 +118,11 @@ def test_a_mod_with_no_keys_is_not_an_error(ready: Config) -> None:
     path = ready.version_dir(WORKSHOP_ID, VERSION)
     (path / "addons").mkdir(parents=True)
 
-    assert sync_keys(ready, State(), "chernarus", [path]) == []
+    assert sync_keys(_server_dir(ready), "chernarus", [path]) == []
 
 
 def test_layout_no_longer_creates_an_instance_keys_dir(ready: Config) -> None:
-    root = ensure_layout(ready, State(), "chernarus")
+    root = ensure_layout(ready, _server_dir(ready), "chernarus")
 
     assert (root / "profiles").is_dir()
     assert not (root / "keys").exists()

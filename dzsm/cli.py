@@ -653,8 +653,14 @@ def server_list(config_path: ConfigPath = Path("config.toml")) -> None:
     if not builds:
         typer.echo("no server app builds downloaded")
     for build in builds:
-        marker = " <- active" if build == state.serverapp_version else ""
-        typer.echo(f"{build}{marker}")
+        flags = []
+        if build == state.serverapp_version:
+            flags.append("newest")
+        users = sorted(n for n, b in state.server_builds.items() if b == build)
+        if users:
+            flags.append(f"used by {', '.join(users)}")
+        suffix = f"  <- {'; '.join(flags)}" if flags else ""
+        typer.echo(f"{build}{suffix}")
 
     if cfg.server_app_path is not None:
         typer.echo("")
@@ -665,12 +671,20 @@ def server_list(config_path: ConfigPath = Path("config.toml")) -> None:
 def instance_start(
     name: str,
     config_path: ConfigPath = Path("config.toml"),
+    refresh_server: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-server",
+            help="Re-copy the server for an isolated instance. Needed after updating an "
+            "external install, which dzsm cannot detect.",
+        ),
+    ] = False,
 ) -> None:
     """Start an instance, activating any newer mod versions in the process."""
     cfg = _load_config(config_path)
     state = _load_state(cfg)
     try:
-        pid = runner.start(cfg, state, name)
+        pid = runner.start(cfg, state, name, refresh_server=refresh_server)
     except (RunnerError, InstanceError, ModCacheError) as exc:
         _fail(exc)
     finally:
@@ -710,7 +724,13 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
         when = upcoming.strftime("%Y-%m-%d %H:%M") if upcoming else "no schedule"
         pins = state.pins.get(name, {})
         versions = ", ".join(f"{k}={v}" for k, v in pins.items()) or "(none pinned)"
+        build = state.server_builds.get(name, "?")
+        if instance.server_build is not None:
+            build += f" (pinned to {instance.server_build})"
+        if instance.isolated_server:
+            build += ", isolated copy"
         typer.echo(f"{name:<16} {marker:<18} port {instance.port}  next {when}")
+        typer.echo(f"{'':<16} server {build}")
         typer.echo(f"{'':<16} {versions}")
 
 

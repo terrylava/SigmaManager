@@ -102,6 +102,15 @@ class InstanceConfig(BaseModel):
     # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
     # for things like admin tools and server-side logic. Same ordering rule applies.
     server_mods: list[str] = Field(default_factory=list)
+    # Pin this instance to a specific server build under serverapp/. None means the
+    # newest downloaded build. Set it to hold production on a known-good build while a
+    # test instance runs a newer one.
+    server_build: str | None = None
+    # Give this instance its own full copy of the server application, under
+    # instances/<name>/server/. Costs a few GB per instance and buys complete isolation:
+    # its own keys/ directory, its own mission files, no shared state with any other
+    # instance. Off by default; instances otherwise share the build directory.
+    isolated_server: bool = False
     # Mods this instance keeps a claim on without loading them. A mod moved here is
     # temporarily disabled, not abandoned: it stops being launched, but it no longer
     # shows up as unused and cannot be swept away by a cleanup. Move it back to `mods`

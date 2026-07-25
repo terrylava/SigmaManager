@@ -59,6 +59,13 @@ server_mods = []
 # unused, and cannot be deleted without --force — so its cache survives and re-enabling
 # it is moving the name back to `mods`, not re-downloading several GB.
 keep_mods = []
+# Pin to a specific downloaded build (see `dzsm server list`). Omit for the newest.
+# Use it to hold production on a known-good build while a test instance runs a newer one.
+# server_build = "24041098"
+# Give this instance its own full copy of the server app under instances/<name>/server/.
+# Costs a few GB and buys complete isolation: its own keys/, its own mission files, no
+# shared state with any other instance.
+isolated_server = false
 restart_schedule = ["04:00", "10:00", "16:00", "22:00"]
 
 [instances.testing]

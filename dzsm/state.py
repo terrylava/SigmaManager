@@ -58,6 +58,10 @@ class State(BaseModel):
     last_seen_remote: dict[int, int] = Field(default_factory=dict)
     # instance name -> the process dzsm last started for it.
     processes: dict[str, ProcessInfo] = Field(default_factory=dict)
+    # instance name -> the server build it activated at its last start. Separate from
+    # `pins` because a build id is a string and a mod version is an int, and conflating
+    # them would make both harder to reason about.
+    server_builds: dict[str, str] = Field(default_factory=dict)
     # Installed server app version, if any.
     serverapp_version: str | None = None
 

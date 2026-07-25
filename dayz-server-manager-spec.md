@@ -93,8 +93,8 @@ root/
     chernarus/
       serverDZ.cfg
       profiles/
-      mpmissions/
-      keys/                                    # .bikey files copied here
+      server/                                  # only when isolated_server = true:
+                                               # a private copy of one server build
   state.json
   config.toml
 ```
@@ -406,6 +406,39 @@ every cleanup path, and a `--all` sweep would reclaim it.
 The guard lives in `delete_version` as well as `remove_mod`, deliberately: a per-version
 delete would otherwise walk straight around a whole-mod protection and destroy the very
 cache the keep exists to preserve.
+
+### Choosing a server build per instance
+
+The server app is versioned like mods, so instances select from it the same way.
+
+- `server_build` pins an instance to a specific build under `serverapp/`. Unset means the
+  newest downloaded one. This is what lets production sit on a known-good build while a
+  test instance runs a newer one — both from the same cache, no reinstalling.
+- Resolution order is instance pin → `server_app_path` → newest downloaded. An instance
+  pin beats the global external path deliberately: it is the more specific statement of
+  intent.
+- The choice is activated at start and recorded in `state.server_builds`, exactly like
+  mod versions. A new build never takes effect under a running server.
+
+### Full isolation
+
+`isolated_server = true` gives an instance a private copy of its build at
+`instances/<name>/server/`. Costs a few GB per instance and buys what om.py's
+per-instance copies gave: its own `keys/`, its own mission files, no shared state with
+any other instance.
+
+Without it, instances sharing a build share that build's `keys/`, so a mod trusted on one
+is trusted on all. Isolation is the fix when that matters — for example when one instance
+runs admin tooling that players on another should not be able to load.
+
+The copy is made when it is missing, when the resolved build changes, or on
+`--refresh-server`. A `.dzsm-build` marker records which build it holds, so an unchanged
+build never triggers a multi-GB recopy. An externally installed server is always labelled
+`external`, so dzsm cannot detect an update underneath it — use `--refresh-server` after
+updating one.
+
+Copying only ever happens with the instance stopped, so a private copy is never rewritten
+while a server holds locks on it.
 
 ### Pins and references refresh on launch
 

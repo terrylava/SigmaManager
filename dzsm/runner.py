@@ -20,7 +20,13 @@ from datetime import datetime, timedelta
 import psutil
 
 from dzsm.config import Config, InstanceConfig
-from dzsm.instance import build_launch_args, ensure_layout, server_executable, sync_keys
+from dzsm.instance import (
+    build_launch_args,
+    ensure_layout,
+    prepare_server_directory,
+    server_executable,
+    sync_keys,
+)
 from dzsm.mods import ModCacheError, mod_paths, resolve_mod_versions, server_mod_paths
 from dzsm.state import ProcessInfo, State, save_state
 
@@ -31,7 +37,9 @@ class RunnerError(Exception):
     """Instance could not be started or stopped."""
 
 
-def start(config: Config, state: State, instance_name: str) -> int:
+def start(
+    config: Config, state: State, instance_name: str, *, refresh_server: bool = False
+) -> int:
     """Start one instance and return its pid.
 
     Resolves which mod versions to activate, writes them into state as this instance's
@@ -47,8 +55,14 @@ def start(config: Config, state: State, instance_name: str) -> int:
         raise RunnerError(f"instance {instance_name!r} is already running")
 
     instance = config.instances[instance_name]
-    exe = server_executable(config, state)
-    ensure_layout(config, state, instance_name)
+    # Resolving (and, when isolated, copying) the server happens here rather than at
+    # config load, because it is an activation decision like mod versions: a new build
+    # takes effect at a restart, never under a running server.
+    server_dir, build = prepare_server_directory(
+        config, state, instance_name, refresh=refresh_server
+    )
+    exe = server_executable(server_dir)
+    ensure_layout(config, server_dir, instance_name)
 
     versions = _versions_to_activate(config, state, instance_name)
     try:
@@ -62,7 +76,7 @@ def start(config: Config, state: State, instance_name: str) -> int:
     # Keys for both lists. A server-only mod's key is not strictly needed — clients never
     # load it — but omitting it would kick any player who happens to have that mod
     # enabled, and keys are tiny. Matches how admins populate the directory by hand.
-    sync_keys(config, state, instance_name, [*paths, *server_paths])
+    sync_keys(server_dir, instance_name, [*paths, *server_paths])
     argv = build_launch_args(config, instance_name, instance, exe, paths, server_paths)
     _log.info("instance %s: starting on port %s", instance_name, instance.port)
     _log.debug("instance %s: argv %s", instance_name, argv)
@@ -78,6 +92,7 @@ def start(config: Config, state: State, instance_name: str) -> int:
         raise RunnerError(f"instance {instance_name!r} failed to start: {exc}") from exc
 
     state.pins[instance_name] = dict(versions)
+    state.server_builds[instance_name] = build
     state.processes[instance_name] = ProcessInfo(
         pid=process.pid,
         port=instance.port,
@@ -85,9 +100,10 @@ def start(config: Config, state: State, instance_name: str) -> int:
         create_time=_create_time(process.pid),
     )
     _log.info(
-        "instance %s: started pid %s with versions %s",
+        "instance %s: started pid %s on server build %s with versions %s",
         instance_name,
         process.pid,
+        build,
         versions or "(no workshop mods)",
     )
     return process.pid

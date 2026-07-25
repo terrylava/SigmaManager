@@ -172,6 +172,9 @@ def create_app(config_path: Path) -> FastAPI:
                     "mods": instance.mods,
                     "server_mods": instance.server_mods,
                     "pins": state.pins.get(name, {}),
+                    "server_build": state.server_builds.get(name),
+                    "server_build_pin": instance.server_build,
+                    "isolated_server": instance.isolated_server,
                     "next_restart": upcoming.isoformat() if upcoming else None,
                 }
             )
