@@ -343,6 +343,22 @@ manual removal, so both refusals below apply to it identically.
 Rollback stays what it always was: point an instance at an older version directory. That
 now works indefinitely rather than for N days.
 
+### Unused mods
+
+Separately from unused *versions*, a whole mod can fall out of use. `dzsm mods unused`
+finds three kinds:
+
+- **unreferenced** — configured, but no instance lists it in its `mods` array.
+- **orphaned** — a `modcache/<workshop_id>/` directory whose id is not in config at all,
+  usually a mod deleted from config without its cache being cleared. This is the case
+  nothing else surfaces: `mods versions` and `mods prune` both work from configured mods,
+  so an orphan is invisible to them and would sit on disk forever.
+- **local** — a configured local mod no instance lists. Reported, but **never deletable
+  by dzsm**: the directory is hand-authored source dzsm did not create (spec §9).
+
+`--select` gives a numbered picker, `--all` takes everything removable, and both confirm
+before deleting. Removal goes through the same refusals as any other delete.
+
 ---
 
 ## 9. Local / non-workshop mods

@@ -17,10 +17,13 @@ from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
 from dzsm.mods import (
     ModCacheError,
+    UnusedMod,
     collect_garbage,
     delete_version,
     promote_snapshot,
     prunable,
+    remove_mod,
+    unused_mods,
     version_status,
 )
 from dzsm.runner import RunnerError
@@ -293,6 +296,121 @@ def mods_versions(
         megabytes = reclaimable / (1024 * 1024)
         typer.echo("")
         typer.echo(f"{megabytes:.1f} MiB in unused versions (kept until deleted)")
+
+
+@mods_app.command("unused")
+def mods_unused(
+    config_path: ConfigPath = Path("config.toml"),
+    select: Annotated[
+        bool,
+        typer.Option("--select", help="Pick which mods to remove, interactively."),
+    ] = False,
+    all_unused: Annotated[
+        bool,
+        typer.Option("--all", help="Select every removable unused mod."),
+    ] = False,
+) -> None:
+    """Find mods nothing references, and optionally remove them.
+
+    Covers both mods configured but listed by no instance, and cache directories for
+    mods that are no longer in config at all. Reports only unless --select or --all.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    unused = unused_mods(cfg, state)
+
+    if not unused:
+        typer.echo("no unused mods")
+        return
+
+    for index, mod in enumerate(unused, start=1):
+        _echo_unused(index, mod)
+
+    removable = [mod for mod in unused if mod.deletable]
+    total = sum(mod.size_bytes for mod in removable)
+    typer.echo("")
+    typer.echo(f"{total / (1024 * 1024):.1f} MiB in {len(removable)} removable mod(s)")
+
+    if not (select or all_unused):
+        typer.echo("re-run with --select to choose, or --all to take everything")
+        return
+
+    chosen = removable if all_unused else _prompt_for_selection(unused)
+    if not chosen:
+        typer.echo("nothing selected")
+        return
+
+    typer.echo("")
+    for mod in chosen:
+        typer.echo(f"  {mod.mod_name or mod.workshop_id}  {mod.path}")
+    if not typer.confirm(f"Remove {len(chosen)} mod(s)?"):
+        typer.echo("aborted")
+        raise typer.Exit(1)
+
+    running = [name for name in cfg.instances if runner.is_running(cfg, state, name)]
+    removed = 0
+    try:
+        for mod in chosen:
+            if mod.workshop_id is None:
+                continue
+            try:
+                remove_mod(cfg, state, mod.workshop_id, running_instances=running)
+                removed += 1
+            except ModCacheError as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+    finally:
+        _save_state(cfg, state)
+
+    typer.secho(f"removed {removed} mod(s)", fg=typer.colors.GREEN)
+
+
+def _echo_unused(index: int, mod: UnusedMod) -> None:
+    name = mod.mod_name or "(not in config)"
+    identifier = mod.workshop_id if mod.workshop_id is not None else "local"
+    size = f"{mod.size_bytes / (1024 * 1024):.1f} MiB"
+    detail = f"{len(mod.versions)} version(s)" if mod.versions else "no cached versions"
+    if mod.kind == "local":
+        tag = typer.style("local — not removable by dzsm", fg=typer.colors.BLUE)
+    elif mod.kind == "orphaned":
+        tag = typer.style("orphaned cache", fg=typer.colors.YELLOW)
+    else:
+        tag = typer.style("no instance uses it", fg=typer.colors.YELLOW)
+    pinned = (
+        typer.style(f"  still pinned by {', '.join(mod.pinned_by)}", fg=typer.colors.RED)
+        if mod.pinned_by
+        else ""
+    )
+    typer.echo(f"{index:>3}) {name:<20} {identifier:<12} {size:>10}  {detail:<18} {tag}{pinned}")
+
+
+def _prompt_for_selection(unused: list[UnusedMod]) -> list[UnusedMod]:
+    """Numbered multi-select. Returns the chosen removable mods, empty if none."""
+    typer.echo("")
+    raw = typer.prompt(
+        "Select numbers to remove (comma separated), 'a' for all, or 'q' to quit",
+        default="q",
+    ).strip().lower()
+
+    if raw in {"q", ""}:
+        return []
+    if raw == "a":
+        return [mod for mod in unused if mod.deletable]
+
+    chosen: list[UnusedMod] = []
+    for token in raw.replace(",", " ").split():
+        if not token.isdigit() or not 1 <= int(token) <= len(unused):
+            typer.secho(f"ignoring invalid selection {token!r}", fg=typer.colors.YELLOW)
+            continue
+        mod = unused[int(token) - 1]
+        if not mod.deletable:
+            typer.secho(
+                f"skipping {mod.mod_name}: local mods are hand-authored source, "
+                f"dzsm will not delete them",
+                fg=typer.colors.YELLOW,
+            )
+            continue
+        chosen.append(mod)
+    return chosen
 
 
 @mods_app.command("prune")

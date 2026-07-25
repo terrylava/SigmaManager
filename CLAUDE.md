@@ -122,7 +122,11 @@ unused, **not the newest for their mod**, and past the window — that middle co
 what stops it deleting an update nobody has activated yet.
 
 `dzsm mods versions` reports, `dzsm mods prune` applies the policy (dry run without
-`--apply`), `dzsm mods delete <mod> <version>` removes one explicitly. Deletion refuses a
+`--apply`), `dzsm mods delete <mod> <version>` removes one explicitly, and `dzsm mods
+unused` finds whole mods nothing references — including **orphaned** cache directories
+whose workshop id is not in config at all, which every other command is blind to because
+they all iterate configured mods. Local mods are reported there but never deletable: that
+directory is hand-authored source dzsm did not create. Deletion refuses a
 version an instance is pinned to (`--force` overrides, and clears the pin), and *never*
 one a running instance is pinned to — the server holds OS-level locks on those files,
 `--force` included. Pruning goes through the same path, so automation gets no extra

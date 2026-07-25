@@ -287,6 +287,164 @@ def delete_version(
     return path
 
 
+@dataclass(frozen=True)
+class UnusedMod:
+    """A mod nothing is using, and what removing it would reclaim.
+
+    Three kinds:
+
+    - "unreferenced": configured as a workshop mod, but no instance lists it.
+    - "orphaned": a modcache directory whose workshop id is not in config at all —
+      usually a mod deleted from config without its cache being cleared.
+    - "local": a configured local mod no instance lists. Reported but never deletable:
+      the directory is hand-authored source that dzsm did not create (spec §9).
+    """
+
+    mod_name: str | None
+    workshop_id: int | None
+    kind: str
+    versions: list[int]
+    size_bytes: int
+    path: Path
+    pinned_by: list[str]
+
+    @property
+    def deletable(self) -> bool:
+        return self.kind != "local"
+
+
+def unused_mods(config: Config, state: State) -> list[UnusedMod]:
+    """Every mod nothing references. Reporting only — deletes nothing.
+
+    Returns a list, empty when everything is in use. Never None (Rule 1).
+    """
+    referenced = {name for instance in config.instances.values() for name in instance.mods}
+    configured_ids = {
+        mod.workshop_id for mod in config.mods.values() if isinstance(mod, WorkshopMod)
+    }
+    unused: list[UnusedMod] = []
+
+    for name, mod in config.mods.items():
+        if name in referenced:
+            continue
+        pinned_by = sorted(
+            instance for instance, pins in state.pins.items() if name in pins
+        )
+        if isinstance(mod, WorkshopMod):
+            versions = state.known_versions(mod.workshop_id)
+            directory = config.modcache_dir / str(mod.workshop_id)
+            unused.append(
+                UnusedMod(
+                    mod_name=name,
+                    workshop_id=mod.workshop_id,
+                    kind="unreferenced",
+                    versions=versions,
+                    size_bytes=_tree_size(directory),
+                    path=directory,
+                    pinned_by=pinned_by,
+                )
+            )
+        else:
+            unused.append(
+                UnusedMod(
+                    mod_name=name,
+                    workshop_id=None,
+                    kind="local",
+                    versions=[],
+                    size_bytes=_tree_size(mod.path),
+                    path=mod.path,
+                    pinned_by=pinned_by,
+                )
+            )
+
+    # Cache directories for mods that are not in config at all. These are invisible to
+    # every other command, so without this they would sit on disk forever.
+    if config.modcache_dir.is_dir():
+        for directory in sorted(config.modcache_dir.iterdir()):
+            if not directory.is_dir() or not directory.name.isdigit():
+                continue
+            workshop_id = int(directory.name)
+            if workshop_id in configured_ids:
+                continue
+            unused.append(
+                UnusedMod(
+                    mod_name=None,
+                    workshop_id=workshop_id,
+                    kind="orphaned",
+                    versions=state.known_versions(workshop_id),
+                    size_bytes=_tree_size(directory),
+                    path=directory,
+                    pinned_by=[],
+                )
+            )
+
+    return unused
+
+
+def remove_mod(
+    config: Config,
+    state: State,
+    workshop_id: int,
+    *,
+    running_instances: Collection[str] = (),
+    force: bool = False,
+) -> list[Path]:
+    """Remove every cached version of one mod, plus its cache directory.
+
+    Same refusals as delete_version, checked up front against the whole mod rather than
+    one version at a time: a pin blocks it, and a pin held by a running instance blocks
+    it even with force.
+
+    Also removes version directories present on disk but absent from state, which is how
+    an interrupted run or a hand-copied directory would otherwise linger forever.
+    """
+    directory = config.modcache_dir / str(workshop_id)
+    pinned_by = sorted(
+        instance
+        for instance, pins in state.pins.items()
+        for mod_name in pins
+        if _workshop_id_of(config, mod_name) == workshop_id
+    )
+
+    running_pins = sorted(set(pinned_by) & set(running_instances))
+    if running_pins:
+        raise ModCacheError(
+            f"refusing to remove mod {workshop_id}: in use by running instance(s) "
+            f"{', '.join(running_pins)}. Stop them first — a running DayZ server holds "
+            f"OS-level locks on its mod files."
+        )
+    if pinned_by and not force:
+        raise ModCacheError(
+            f"refusing to remove mod {workshop_id}: instance(s) "
+            f"{', '.join(pinned_by)} are pinned to it. Repoint them first, or pass force."
+        )
+
+    removed: list[Path] = []
+    for version in state.known_versions(workshop_id):
+        try:
+            removed.append(
+                delete_version(
+                    config,
+                    state,
+                    workshop_id,
+                    version,
+                    running_instances=running_instances,
+                    force=force,
+                )
+            )
+        except ModCacheError as exc:
+            _log.error("mods: could not remove version %s of %s: %s", version, workshop_id, exc)
+
+    if directory.is_dir():
+        # Sweeps up version directories that were never recorded in state.
+        safe_rmtree(directory)
+        _log.info("mods: removed cache directory %s", directory)
+        if directory not in removed:
+            removed.append(directory)
+
+    return removed
+
+
 def prunable(
     config: Config,
     state: State,
