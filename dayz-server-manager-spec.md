@@ -481,6 +481,24 @@ The server usually dies before answering `#shutdown`, so a missing reply is not 
 failure — whether it worked is decided by watching the process, not by the reply. RCON not
 being configured, or being unreachable, simply falls through to signalling.
 
+### Stopping means stopping
+
+`dzsm instance stop` **holds the instance down**: the supervisor will not restart it, on
+crash or on schedule, until someone starts it again. Starting releases the hold.
+
+Without this a supervisor immediately undoes an explicit stop, so you cannot take a server
+down for maintenance — and the workaround people reach for is killing the supervisor,
+which loses the crash restarts for everything else too.
+
+The hold lives in `state.json`, so it survives a daemon restart: an instance you took down
+on Friday is still down on Monday.
+
+Two things deliberately do *not* hold:
+
+- `--no-hold` on a stop, which is how to bounce an instance under a supervisor.
+- The supervisor's own scheduled restart, which is a stop and a start rather than a
+  request for the instance to stay down.
+
 ### Restart timing
 
 Two independent sources, whichever comes first:

@@ -61,6 +61,10 @@ def start(
     if is_running(config, state, instance_name):
         raise RunnerError(f"instance {instance_name!r} is already running")
 
+    # Starting is the release: whatever held it down, this is someone asking for it up.
+    if state.held.pop(instance_name, None) is not None:
+        _log.info("instance %s: hold released", instance_name)
+
     instance = config.instances[instance_name]
     # Resolving (and, when isolated, copying) the server happens here rather than at
     # config load, because it is an activation decision like mod versions: a new build
@@ -123,8 +127,27 @@ def start(
     return process.pid
 
 
-def stop(config: Config, state: State, instance_name: str, *, timeout: float | None = None) -> None:
-    """Stop an instance, giving it time to flush persistence before killing it."""
+def stop(
+    config: Config,
+    state: State,
+    instance_name: str,
+    *,
+    timeout: float | None = None,
+    hold: bool = True,
+) -> None:
+    """Stop an instance, giving it time to flush persistence before killing it.
+
+    By default this also *holds* the instance down: the supervisor will not restart it,
+    on crash or on schedule, until someone starts it again. An explicit stop that the
+    supervisor immediately undoes is worse than no supervisor at all.
+
+    `hold=False` is for a stop that is one half of a restart — the supervisor's own
+    scheduled bounce, which is not a request for the instance to stay down.
+    """
+    if hold:
+        state.held[instance_name] = datetime.now().astimezone()
+        _log.info("instance %s: held down; `instance start` will release it", instance_name)
+
     process = _live_process(config, state, instance_name)
     if process is None:
         _log.info("instance %s: not running", instance_name)
@@ -317,7 +340,9 @@ def supervise(
     due: dict[str, datetime | None] = {}
     warned: dict[str, datetime] = {}
     for name in instance_names:
-        if not is_running(config, state, name):
+        if name in state.held:
+            _log.info("instance %s: held down, not starting", name)
+        elif not is_running(config, state, name):
             _start_and_save(config, state, name, reason="initial start")
         due[name] = _due_at(config, state, name)
 
@@ -333,6 +358,11 @@ def supervise(
             state = _reload(config, state)
 
             for name in instance_names:
+                if name in state.held:
+                    # Deliberately down. Not a crash, not due a restart — leave it alone
+                    # until someone starts it.
+                    continue
+
                 scheduled = due[name]
                 if scheduled is not None and now >= scheduled:
                     _log.info("instance %s: scheduled restart", name)
@@ -598,7 +628,8 @@ def _start_and_save(config: Config, state: State, instance_name: str, *, reason:
 
 def _restart_and_save(config: Config, state: State, instance_name: str) -> None:
     try:
-        stop(config, state, instance_name)
+        # hold=False: this stop is one half of a restart, not a request to stay down.
+        stop(config, state, instance_name, hold=False)
     except (RunnerError, psutil.Error) as exc:
         _log.error("instance %s: stop failed during restart: %s", instance_name, exc)
     _start_and_save(config, state, instance_name, reason="scheduled restart")

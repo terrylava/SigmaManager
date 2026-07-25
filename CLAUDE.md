@@ -244,6 +244,12 @@ frozen build and are already handled — do not undo them:
 **`dzsm daemon` is the long-running form**: supervision in a background thread, uvicorn on
 the main one, so a Ctrl-C or service stop shuts both down. Three properties it must keep:
 
+- **A stopped instance stays stopped.** `runner.stop` records a hold in `state.held`, and
+  the supervisor skips held instances entirely — no crash restart, no scheduled restart —
+  until `start` releases it. A supervisor that undoes an explicit stop makes maintenance
+  impossible and pushes people to kill the supervisor instead, losing every other
+  instance's crash restarts. `hold=False` exists for the two cases that are not a request
+  to stay down: `--no-hold`, and the supervisor's own restart.
 - **Instances are left running when it exits.** dzsm going down must not take the game
   servers with it; it adopts them again from `state.json` on restart.
 - **The supervisor waits on an `Event`, not `sleep`**, so a service stop does not sit

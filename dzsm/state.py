@@ -58,6 +58,11 @@ class State(BaseModel):
     last_seen_remote: dict[int, int] = Field(default_factory=dict)
     # instance name -> the process dzsm last started for it.
     processes: dict[str, ProcessInfo] = Field(default_factory=dict)
+    # instance name -> when it was deliberately stopped. A held instance is not restarted
+    # by the supervisor, on crash or on schedule: someone asked for it to be down, and a
+    # supervisor that immediately undoes an explicit stop is worse than no supervisor.
+    # Starting it clears the hold.
+    held: dict[str, datetime] = Field(default_factory=dict)
     # instance name -> the server build it activated at its last start. Separate from
     # `pins` because a build id is a string and a mod version is an int, and conflating
     # them would make both harder to reason about.

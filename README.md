@@ -67,6 +67,11 @@ RCON warnings) and serves the dashboard and API. This is what to run as a servic
 Instances are deliberately **left running** when it exits — dzsm going down must not take
 the game servers with it. Restart the daemon and it adopts them again from `state.json`.
 
+`dzsm instance stop` holds an instance down: the supervisor leaves it alone until you
+start it again, so taking a server out for maintenance works without stopping the daemon.
+The hold is in `state.json`, so it survives a daemon restart. Use `--no-hold` to stop one
+and let the supervisor bring it straight back, which is how to bounce it.
+
 ### As a Windows service
 
 The simplest option with no extra software is Task Scheduler, run at startup whether or

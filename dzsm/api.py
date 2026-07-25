@@ -173,6 +173,7 @@ def create_app(config_path: Path) -> FastAPI:
                     "name": name,
                     "port": instance.port,
                     "running": runner.is_running(config, state, name),
+                    "held": name in state.held,
                     "mods": instance.mods,
                     "server_mods": instance.server_mods,
                     "pins": state.pins.get(name, {}),
@@ -277,23 +278,25 @@ def create_app(config_path: Path) -> FastAPI:
         return {"name": name, "pid": pid, "pins": state.pins.get(name, {})}
 
     @app.post("/api/instances/{name}/stop", dependencies=writes)
-    def stop_instance(name: str) -> dict[str, Any]:
+    def stop_instance(name: str, hold: bool = True) -> dict[str, Any]:
+        """Stop an instance. It stays down until started, unless hold=false."""
         state = current_state()
         _known_instance(config, name)
         try:
-            runner.stop(config, state, name)
+            runner.stop(config, state, name, hold=hold)
         except runner.RunnerError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         finally:
             save_state(config.state_file, state)
-        return {"name": name, "running": False}
+        return {"name": name, "running": False, "held": hold}
 
     @app.post("/api/instances/{name}/restart", dependencies=writes)
     def restart_instance(name: str) -> dict[str, Any]:
         state = current_state()
         _known_instance(config, name)
         try:
-            runner.stop(config, state, name)
+            # hold=False: a restart is not a request for the instance to stay down.
+            runner.stop(config, state, name, hold=False)
             pid = runner.start(config, state, name)
         except (runner.RunnerError, InstanceError, ModCacheError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

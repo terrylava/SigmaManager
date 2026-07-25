@@ -774,19 +774,34 @@ def instance_start(
 
 
 @instance_app.command("stop")
-def instance_stop(name: str, config_path: ConfigPath = Path("config.toml")) -> None:
-    """Stop an instance."""
+def instance_stop(
+    name: str,
+    config_path: ConfigPath = Path("config.toml"),
+    hold: Annotated[
+        bool,
+        typer.Option(
+            "--hold/--no-hold",
+            help="Keep it down. --no-hold lets a running supervisor restart it.",
+        ),
+    ] = True,
+) -> None:
+    """Stop an instance, and keep it stopped.
+
+    A supervisor will not restart a stopped instance until you start it again. Use
+    --no-hold to stop it and let the supervisor bring it straight back, which is how to
+    bounce one.
+    """
     cfg = _load_config(config_path)
     state = _load_state(cfg)
     if name not in cfg.instances:
         _fail(ValueError(f"unknown instance {name!r}"))
     try:
-        runner.stop(cfg, state, name)
+        runner.stop(cfg, state, name, hold=hold)
     except RunnerError as exc:
         _fail(exc)
     finally:
         _save_state(cfg, state)
-    typer.echo(f"{name}: stopped")
+    typer.echo(f"{name}: stopped" + (" and held down" if hold else ""))
 
 
 @instance_app.command("status")
@@ -800,7 +815,12 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
 
     for name, instance in cfg.instances.items():
         running = runner.is_running(cfg, state, name)
-        marker = typer.style("running", fg=typer.colors.GREEN) if running else "stopped"
+        if running:
+            marker = typer.style("running", fg=typer.colors.GREEN)
+        elif name in state.held:
+            marker = typer.style("held down", fg=typer.colors.CYAN)
+        else:
+            marker = "stopped"
         process = state.processes.get(name)
         upcoming = runner.next_restart(
             instance, started_at=process.started_at if process else None
