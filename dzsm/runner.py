@@ -14,7 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import subprocess
-import time
+import threading
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 
@@ -35,7 +35,7 @@ from dzsm.instance import (
 )
 from dzsm.mods import ModCacheError, mod_paths, resolve_mod_versions, server_mod_paths
 from dzsm.rcon import RconClient, RconError
-from dzsm.state import ProcessInfo, State, save_state
+from dzsm.state import ProcessInfo, State, StateError, load_state, save_state
 
 _log = logging.getLogger(__name__)
 
@@ -289,15 +289,24 @@ def humanize(seconds: float) -> str:
     return f"{total} seconds"
 
 
-def supervise(config: Config, state: State, instance_names: list[str]) -> None:
+def supervise(
+    config: Config,
+    state: State,
+    instance_names: list[str],
+    *,
+    stop: threading.Event | None = None,
+) -> None:
     """Run the supervision loop: restart on crash and on schedule.
 
     Restart schedules are deliberately staggered across instances. Under this design that
     is a feature — two instances can run different versions of the same mod, so
     staggering no longer deadlocks updates the way it did in om.py (spec §2).
 
-    Runs until interrupted. State is saved after every transition so a crash of dzsm
-    itself does not lose track of what it started.
+    Runs until interrupted, or until `stop` is set — which is how the daemon shuts it
+    down from another thread. State is saved after every transition so a crash of dzsm
+    itself does not lose track of what it started, and re-read at the top of each pass so
+    an instance started or stopped through the API is not clobbered by this loop's older
+    in-memory copy.
     """
     unknown = [name for name in instance_names if name not in config.instances]
     if unknown:
@@ -313,10 +322,15 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
         due[name] = _due_at(config, state, name)
 
     _log.info("supervising %s; Ctrl-C to stop", ", ".join(instance_names))
+    waiter = stop or threading.Event()
     try:
-        while True:
-            time.sleep(_tick_seconds(config, due))
+        while not waiter.is_set():
+            # wait(), not sleep(): a daemon shutting down should not have to sit through
+            # a full poll interval.
+            if waiter.wait(_tick_seconds(config, due)):
+                break
             now = datetime.now()
+            state = _reload(config, state)
 
             for name in instance_names:
                 scheduled = due[name]
@@ -349,6 +363,21 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
                     due[name] = _due_at(config, state, name)
     except KeyboardInterrupt:
         _log.info("supervision interrupted; leaving instances running")
+    else:
+        _log.info("supervision stopped; leaving instances running")
+
+
+def _reload(config: Config, current: State) -> State:
+    """Re-read state, keeping the in-memory copy if the file is unreadable.
+
+    The API mutates state from another thread of the same process; without this, the
+    supervisor's older copy would overwrite those changes at its next save.
+    """
+    try:
+        return load_state(config.state_file)
+    except StateError as exc:
+        _log.error("could not re-read state, continuing with the in-memory copy: %s", exc)
+        return current
 
 
 # --- internals ---------------------------------------------------------------

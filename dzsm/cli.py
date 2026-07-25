@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import threading
 from pathlib import Path
-from typing import Annotated, NoReturn, Optional
+from typing import Annotated, Any, NoReturn, Optional
 
 import typer
 
@@ -166,6 +167,93 @@ def serve(
             )
         )
 
+    uvicorn, create_app = _web_dependencies(cfg)
+
+    if cfg.api.token() is None:
+        typer.secho(
+            f"no token set ({cfg.api.token_env} is unset) — writes are unauthenticated, "
+            f"which is why this is bound to {bind_host}",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo(f"http://{bind_host}:{bind_port}")
+    uvicorn.run(create_app(config_path), host=bind_host, port=bind_port, log_level="info")
+
+
+@app.command()
+def daemon(
+    config_path: ConfigPath = Path("config.toml"),
+    host: Annotated[
+        Optional[str],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Option("--host", help="Override api.host."),
+    ] = None,
+    port: Annotated[
+        Optional[int],  # noqa: UP045
+        typer.Option("--port", help="Override api.port."),
+    ] = None,
+    only: Annotated[
+        Optional[list[str]],  # noqa: UP045
+        typer.Option("--only", help="Supervise just these instances. Repeatable."),
+    ] = None,
+) -> None:
+    """Supervise instances and serve the API, in one long-running process.
+
+    This is what to run as a service: it keeps servers up, restarts them on schedule, and
+    stays reachable for the dashboard and API. Supervision runs in a background thread;
+    the web server holds the main one, so Ctrl-C (or a service stop) shuts both down.
+
+    Instances are deliberately left running when it exits — dzsm going down should not
+    take the servers with it.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    bind_host = host or cfg.api.host
+    bind_port = port or cfg.api.port
+    names = only or list(cfg.instances)
+
+    if not names:
+        _fail(ValueError("no instances configured to supervise"))
+    unknown = [name for name in names if name not in cfg.instances]
+    if unknown:
+        _fail(ValueError(f"unknown instance(s): {', '.join(unknown)}"))
+    if not _is_loopback(bind_host) and cfg.api.token() is None:
+        _fail(
+            ValueError(
+                f"refusing to bind {bind_host} without a token: this API can start, "
+                f"stop, and delete things. Set {cfg.api.token_env}, or bind 127.0.0.1."
+            )
+        )
+
+    uvicorn, create_app = _web_dependencies(cfg)
+
+    stop = threading.Event()
+    supervisor = threading.Thread(
+        target=runner.supervise,
+        args=(cfg, state, names),
+        kwargs={"stop": stop},
+        name="dzsm-supervisor",
+        daemon=True,
+    )
+    supervisor.start()
+
+    typer.echo(f"supervising {', '.join(names)}")
+    typer.echo(f"http://{bind_host}:{bind_port}")
+    try:
+        uvicorn.run(
+            create_app(config_path), host=bind_host, port=bind_port, log_level="info"
+        )
+    finally:
+        stop.set()
+        # The supervisor may be mid-restart; give it time to finish rather than leaving
+        # a half-started instance unrecorded in state.
+        supervisor.join(timeout=cfg.stop_timeout_seconds)
+        if supervisor.is_alive():
+            typer.secho(
+                "supervisor did not stop within the timeout", fg=typer.colors.YELLOW, err=True
+            )
+
+
+def _web_dependencies(cfg: Config) -> tuple[Any, Any]:
+    """Import uvicorn and the app factory, failing usefully when the extra is missing."""
     try:
         import uvicorn
 
@@ -177,15 +265,7 @@ def serve(
                 f'pip install "dzsm[web]"'
             )
         )
-
-    if cfg.api.token() is None:
-        typer.secho(
-            f"no token set ({cfg.api.token_env} is unset) — writes are unauthenticated, "
-            f"which is why this is bound to {bind_host}",
-            fg=typer.colors.YELLOW,
-        )
-    typer.echo(f"http://{bind_host}:{bind_port}")
-    uvicorn.run(create_app(config_path), host=bind_host, port=bind_port, log_level="info")
+    return uvicorn, create_app
 
 
 def _is_loopback(host: str) -> bool:

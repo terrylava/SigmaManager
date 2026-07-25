@@ -232,7 +232,18 @@ Copying happens only with the instance stopped.
 Disk is explicitly the secondary concern here — managing many servers, mods, and versions
 comes first. Do not "optimize" isolation or the version cache away.
 
-**The web API is live** (`dzsm serve`). It is deliberately thin — every route calls the
+**`dzsm daemon` is the long-running form**: supervision in a background thread, uvicorn on
+the main one, so a Ctrl-C or service stop shuts both down. Three properties it must keep:
+
+- **Instances are left running when it exits.** dzsm going down must not take the game
+  servers with it; it adopts them again from `state.json` on restart.
+- **The supervisor waits on an `Event`, not `sleep`**, so a service stop does not sit
+  through a poll interval.
+- **State is re-read at the top of each supervision pass.** The API mutates it from
+  another thread of the same process; without the reload, the supervisor's older copy
+  would overwrite those changes at its next save.
+
+**The web API is live** (`dzsm serve` alone, or inside `dzsm daemon`). It is deliberately thin — every route calls the
 same functions the CLI does, so the two can never disagree about what "running" or
 "pinned" means. Do not let it grow its own model of an instance or a version.
 

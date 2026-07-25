@@ -35,6 +35,52 @@ verified against live Steam, the download path only against fakes.
 | `cli.py` | Done |
 | `api.py` | Done |
 
+## Running it always
+
+```bash
+dzsm daemon
+```
+
+One long-running process: supervises every instance (crash restart, scheduled restart,
+RCON warnings) and serves the dashboard and API. This is what to run as a service.
+
+Instances are deliberately **left running** when it exits — dzsm going down must not take
+the game servers with it. Restart the daemon and it adopts them again from `state.json`.
+
+### As a Windows service
+
+The simplest option with no extra software is Task Scheduler, run at startup whether or
+not anyone logs in:
+
+```bash
+schtasks /create /tn dzsm /tr "\"D:\SigmaManager\.venv\Scripts\dzsm.exe\" daemon --config D:\dz\config.toml" /sc onstart /ru SYSTEM /rl HIGHEST
+```
+
+For real service semantics — automatic restart if dzsm itself dies, proper stop control —
+use [NSSM](https://nssm.cc/):
+
+```bash
+nssm install dzsm "D:\SigmaManager\.venv\Scripts\dzsm.exe" "daemon --config D:\dz\config.toml"
+```
+
+### As a systemd service
+
+```ini
+[Unit]
+Description=dzsm
+After=network-online.target
+
+[Service]
+ExecStart=/opt/dzsm/.venv/bin/dzsm daemon --config /opt/dz/config.toml
+Restart=always
+RestartSec=10
+# dzsm restarting must not take the servers with it.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## Web API
 
 ```bash
