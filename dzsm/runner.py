@@ -211,19 +211,21 @@ def rcon_client(config: Config, instance_name: str) -> RconClient | None:
     cannot connect *does* raise, because that is a broken setup worth hearing about.
     """
     instance = config.instances[instance_name]
-    if instance.rcon_port is None:
+    port = instance.resolved_rcon_port()
+    if port is None:
         return None
 
     password = config.rcon.password(instance.rcon_password_env)
     if not password:
         env = instance.rcon_password_env or config.rcon.password_env
         raise RconError(
-            f"instance {instance_name!r} has rcon_port set but {env} is unset or empty"
+            f"instance {instance_name!r}: RCON is enabled (port {port}) but {env} is "
+            f"unset or empty. Set it, or turn RCON off with rcon_enabled = false."
         )
 
     client = RconClient(
         config.rcon.host,
-        instance.rcon_port,
+        port,
         password,
         timeout=config.rcon.timeout_seconds,
     )

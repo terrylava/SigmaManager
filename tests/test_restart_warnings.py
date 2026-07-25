@@ -42,6 +42,58 @@ class _Recorder:
         self.closed = True
 
 
+# --- port derivation ---------------------------------------------------------
+
+
+def test_rcon_port_defaults_to_three_above_the_game_port() -> None:
+    """Stock DayZ layout: a 2302 server has RCON on 2305."""
+    assert InstanceConfig(port=2302, mods=[]).resolved_rcon_port() == 2305
+
+
+def test_the_offset_follows_a_custom_port() -> None:
+    assert InstanceConfig(port=2502, mods=[]).resolved_rcon_port() == 2505
+
+
+def test_an_explicit_port_wins() -> None:
+    instance = InstanceConfig(port=2302, mods=[], rcon_port=2306)
+    assert instance.resolved_rcon_port() == 2306
+
+
+def test_rcon_can_be_turned_off() -> None:
+    instance = InstanceConfig(port=2302, mods=[], rcon_enabled=False)
+    assert instance.resolved_rcon_port() is None
+
+
+def test_disabling_beats_an_explicit_port() -> None:
+    """Otherwise "off" would quietly not be off."""
+    instance = InstanceConfig(port=2302, mods=[], rcon_port=2306, rcon_enabled=False)
+    assert instance.resolved_rcon_port() is None
+
+
+def test_a_disabled_instance_gets_no_client(config: Config) -> None:
+    disabled = config.model_copy(
+        update={
+            "instances": {
+                "chernarus": InstanceConfig(port=2302, mods=[], rcon_enabled=False)
+            }
+        }
+    )
+    assert runner.rcon_client(disabled, "chernarus") is None
+
+
+def test_a_missing_password_names_the_variable_and_the_way_out(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RCON is on by default now, so this error will be the first thing many users see."""
+    enabled = config.model_copy(
+        update={"instances": {"chernarus": InstanceConfig(port=2302, mods=[])}}
+    )
+    monkeypatch.delenv("DZSM_RCON_PASSWORD", raising=False)
+
+    with pytest.raises(RconError, match="DZSM_RCON_PASSWORD"):
+        runner.rcon_client(enabled, "chernarus")
+
+
 # --- phrasing ----------------------------------------------------------------
 
 

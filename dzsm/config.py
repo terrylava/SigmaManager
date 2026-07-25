@@ -24,6 +24,10 @@ WORKSHOP_APPID = 221100
 MAX_PATH = 260
 MAX_ROOT_PATH_LEN = 40
 
+# BattlEye's RCON port sits three above the game port in a stock DayZ layout: a server on
+# 2302 listens for RCON on 2305.
+RCON_PORT_OFFSET = 3
+
 
 class ConfigError(Exception):
     """Configuration is unusable. Raised at load; never swallowed (Rule 3)."""
@@ -133,11 +137,23 @@ class InstanceConfig(BaseModel):
     # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
     # for things like admin tools and server-side logic. Same ordering rule applies.
     server_mods: list[str] = Field(default_factory=list)
-    # BattlEye RCON port for this instance, from its BEServer config's RConPort. None
-    # disables RCON here — no restart warnings, no admin chat.
+    # BattlEye RCON port. None derives it as port + RCON_PORT_OFFSET, the usual DayZ
+    # layout — a 2302 server has RCON on 2305. Set it explicitly when the instance's
+    # BEServer config says otherwise.
     rcon_port: int | None = None
+    # Turn RCON off for this instance entirely: no restart warnings, no admin chat, and
+    # stops fall back to signalling the process.
+    rcon_enabled: bool = True
     # Env var holding this instance's RCON password, when it differs from the global one.
     rcon_password_env: str | None = None
+
+    def resolved_rcon_port(self) -> int | None:
+        """The RCON port to talk to, or None when RCON is off for this instance."""
+        if not self.rcon_enabled:
+            return None
+        if self.rcon_port is not None:
+            return self.rcon_port
+        return self.port + RCON_PORT_OFFSET
     # Mission directory name for this instance, e.g. "pvp.chernarusplus". None derives
     # "<instance>.<terrain>" from mission_source. dzsm keeps serverDZ.cfg's `template`
     # pointed at whatever this resolves to.

@@ -165,6 +165,11 @@ an unreachable server — hence the byte-level tests. Server-message packets mus
 acknowledged or BattlEye retransmits them, and they interleave with command replies, so
 the client acks and keeps waiting rather than treating one as the answer.
 
+RCON is **on by default** on `port + 3` (a 2302 server → 2305, the stock DayZ layout).
+`rcon_port` overrides, `rcon_enabled = false` opts out. Because it is on by default, the
+"password not set" error is the first thing many users will hit — it names the variable
+and the way to turn RCON off.
+
 Restart warnings run in two tiers: every 5 minutes from 30 minutes out, then every 4
 seconds for the last 5. The supervise tick shortens to 4s inside the final window — a 15s
 poll cannot deliver a message every 4s — but is never lengthened during the early tier,

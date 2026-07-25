@@ -413,9 +413,10 @@ DayZ's RCON is BattlEye's: UDP, CRC32-framed, sequence-numbered. `dzsm/rcon.py` 
 it directly — the framing is worth care because a wrong CRC produces *no reply at all*
 rather than an error, so an encoding bug is indistinguishable from an unreachable server.
 
-An instance participates only when it sets `rcon_port`; dzsm never guesses one. The
-password comes from an environment variable and must match `RConPassword` in that
-server's BEServer config.
+**RCON is on by default**, on `port + 3` — the stock DayZ layout, where a 2302 server
+listens for RCON on 2305. `rcon_port` overrides it when a server's BEServer config says
+otherwise; `rcon_enabled = false` opts an instance out entirely. The password comes from
+an environment variable and must match `RConPassword` in that server's BEServer config.
 
 Warnings come in two tiers, counting down in human terms — "20 minutes", "1 minute",
 "20 seconds":

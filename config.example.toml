@@ -20,8 +20,8 @@ snapshot_strategy = "copy"
 per_instance_missions = true
 
 [rcon]
-# BattlEye RCON, used for restart warnings and admin chat. An instance takes part only
-# when it sets rcon_port — dzsm will not guess a port.
+# BattlEye RCON, used for restart warnings and admin chat. On by default for every
+# instance, on port + 3; set rcon_enabled = false on an instance to opt out.
 host = "127.0.0.1"
 # The password is read from this env var, never from config. It must match RConPassword
 # in the server's BEServer config (under <profiles>/BattlEye/).
@@ -83,9 +83,12 @@ server_mods = []
 # unused, and cannot be deleted without --force — so its cache survives and re-enabling
 # it is moving the name back to `mods`, not re-downloading several GB.
 keep_mods = []
-# BattlEye RCON port, from this server's BEServer config (RConPort). Without it the
-# instance gets no restart warnings and no admin chat.
+# BattlEye RCON port. Defaults to port + 3 — a 2302 server uses 2305 — which is the
+# stock DayZ layout. Set it only if this server's BEServer config says otherwise.
 # rcon_port = 2306
+# Turn RCON off here entirely: no restart warnings, no admin chat, and stops fall back
+# to signalling the process.
+# rcon_enabled = false
 # Env var for this instance's RCON password, if it differs from the global one.
 # rcon_password_env = "DZSM_RCON_PASSWORD_CHERNARUS"
 # Mission directory for this instance. Omit to derive "<instance>.<terrain>".

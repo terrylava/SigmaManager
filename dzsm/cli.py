@@ -733,7 +733,9 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
             build += f" (pinned to {instance.server_build})"
         if instance.isolated_server:
             build += ", isolated copy"
-        typer.echo(f"{name:<16} {marker:<18} port {instance.port}  next {when}")
+        rcon_port = instance.resolved_rcon_port()
+        rcon = f"rcon {rcon_port}" if rcon_port else "rcon off"
+        typer.echo(f"{name:<16} {marker:<18} port {instance.port}  {rcon}  next {when}")
         typer.echo(f"{'':<16} server {build}")
         typer.echo(f"{'':<16} {versions}")
 
@@ -754,7 +756,7 @@ def instance_say(
     except RconError as exc:
         _fail(exc)
     if client is None:
-        _fail(ValueError(f"instance {name!r} has no rcon_port configured"))
+        _fail(ValueError(f"instance {name!r} has rcon_enabled = false"))
 
     try:
         client.say(message)
@@ -781,7 +783,7 @@ def instance_rcon(
     except RconError as exc:
         _fail(exc)
     if client is None:
-        _fail(ValueError(f"instance {name!r} has no rcon_port configured"))
+        _fail(ValueError(f"instance {name!r} has rcon_enabled = false"))
 
     try:
         typer.echo(client.command(command))
