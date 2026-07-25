@@ -183,15 +183,16 @@ Access model, which is the part to not weaken:
 Downloads return 202 with a job id; jobs are in-memory and deliberately not persisted, as
 a "running" job restored from disk after a restart would be a lie.
 
-**`server_app_path` is interim.** Because `update_server_app` is a stub, dzsm cannot
-download appid 223350, so instances run against a Steam-installed server pointed at by
-config. dzsm only reads from there — profiles, logs, keys, and serverDZ.cfg all live
-under `instances/<name>/`. When the server app becomes managed, `serverapp/<version>/`
-takes over and this option becomes a fallback.
+**`server_app_path` is now a fallback, not the norm.** dzsm downloads and versions the
+server app itself; this option points at an externally installed server for people who
+would rather Steam managed it. dzsm only reads from there — profiles, logs, and
+serverDZ.cfg live under `instances/<name>/`, and keys go to that install's `keys/`.
 
-The Web API path is verified against live Steam. **The steamcmd path has never run
-against a real Steam account** — it is covered only by fakes, so the first real
-`mods update` is the actual test of `download_mod`.
+Everything here has been exercised against live Steam and a real DayZ 1.29 server:
+steamcmd bootstrap, Guard seeding, cached-credential login, mod download and
+verification, promotion, server app download, instance start/stop, supervision with crash
+and scheduled restarts, key sync confirmed by a connecting client, `-serverMod=`, and an
+isolated per-instance server copy.
 
 Two details worth knowing before touching this code:
 
