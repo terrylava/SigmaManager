@@ -32,6 +32,19 @@ class ModVersion(BaseModel):
     size_bytes: int = 0
 
 
+class ProcessInfo(BaseModel):
+    """A server process dzsm started.
+
+    create_time is recorded alongside the pid because pids get reused: on its own a live
+    pid proves nothing about whether it is still *our* process.
+    """
+
+    pid: int
+    port: int
+    started_at: datetime
+    create_time: float | None = None
+
+
 class State(BaseModel):
     """Everything dzsm knows that isn't in config."""
 
@@ -43,6 +56,8 @@ class State(BaseModel):
     pins: dict[str, dict[str, int]] = Field(default_factory=dict)
     # workshop_id -> time_updated last seen from the Steam Web API.
     last_seen_remote: dict[int, int] = Field(default_factory=dict)
+    # instance name -> the process dzsm last started for it.
+    processes: dict[str, ProcessInfo] = Field(default_factory=dict)
     # Installed server app version, if any.
     serverapp_version: str | None = None
 

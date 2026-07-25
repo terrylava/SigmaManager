@@ -102,6 +102,16 @@ class Config(BaseModel):
     allow_long_root: bool = False
     # steamcmd can legitimately take a long time on a big mod.
     download_timeout_seconds: int = 3600
+    # Path to an existing DayZ server installation. Interim: until update_server_app()
+    # lands, dzsm cannot download appid 223350 itself, so instances run against a server
+    # installed by Steam. When unset, the server app is taken from
+    # serverapp/<state.serverapp_version>/ instead.
+    server_app_path: Path | None = None
+    # How often the supervision loop checks liveness and the restart schedule.
+    supervise_poll_seconds: int = 15
+    # Grace period for a server to shut down before it is killed. DayZ flushes
+    # persistence on exit, so do not make this small.
+    stop_timeout_seconds: int = 60
 
     # --- derived paths (spec §3) ---
 

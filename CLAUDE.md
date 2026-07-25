@@ -105,12 +105,24 @@ no manual install step exists. It runs from `_run_steamcmd` and `login_interacti
 idempotent, and guards extraction against archive members that escape the target
 directory — it writes an executable, so the archive is treated as untrusted input.
 
-Also done: config models + validation, state models + atomic I/O,
-`is_reparse_point`/`safe_rmtree`, launch-arg construction, `mods list`.
+**Instances and supervision work too.** `dzsm instance start|stop|status|supervise` are
+live: activation resolves the newest cached version at start, writes it into
+`state.pins`, syncs `.bikey` files into the instance's `keys/`, and spawns the server
+with an absolute-path `-mod=`. Verified end to end against DayZ 1.29 — started, showed
+`CF=1771519119` running on port 2402, loaded the mod from the version directory, stopped
+cleanly.
 
-Still stubbed (each raises `NotImplementedError` with a spec section reference):
-`runner.py` entirely, `mods.refcounts`/`collect_garbage`, `instance.ensure_layout`/
-`sync_keys`, `steam.update_server_app`, `api.py`.
+Also done: config models + validation, state models + atomic I/O,
+`is_reparse_point`/`safe_rmtree`, launch-arg construction, `mods list`, refcounting.
+
+Still stubbed: `mods.collect_garbage` (so `dzsm mods gc` raises),
+`steam.update_server_app`, `api.py`.
+
+**`server_app_path` is interim.** Because `update_server_app` is a stub, dzsm cannot
+download appid 223350, so instances run against a Steam-installed server pointed at by
+config. dzsm only reads from there — profiles, logs, keys, and serverDZ.cfg all live
+under `instances/<name>/`. When the server app becomes managed, `serverapp/<version>/`
+takes over and this option becomes a fallback.
 
 The Web API path is verified against live Steam. **The steamcmd path has never run
 against a real Steam account** — it is covered only by fakes, so the first real

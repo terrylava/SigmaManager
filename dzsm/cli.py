@@ -12,8 +12,11 @@ from typing import Annotated, NoReturn, Optional
 
 import typer
 
+from dzsm import runner
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
+from dzsm.instance import InstanceError
 from dzsm.mods import ModCacheError, promote_snapshot
+from dzsm.runner import RunnerError
 from dzsm.state import State, StateError, load_state, save_state
 from dzsm.steam import (
     SteamError,
@@ -250,25 +253,71 @@ def instance_start(
     config_path: ConfigPath = Path("config.toml"),
 ) -> None:
     """Start an instance, activating any newer mod versions in the process."""
-    raise NotImplementedError("runner.start")
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    try:
+        pid = runner.start(cfg, state, name)
+    except (RunnerError, InstanceError, ModCacheError) as exc:
+        _fail(exc)
+    finally:
+        _save_state(cfg, state)
+    typer.secho(f"{name}: started (pid {pid})", fg=typer.colors.GREEN)
 
 
 @instance_app.command("stop")
 def instance_stop(name: str, config_path: ConfigPath = Path("config.toml")) -> None:
     """Stop an instance."""
-    raise NotImplementedError("runner.stop")
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    if name not in cfg.instances:
+        _fail(ValueError(f"unknown instance {name!r}"))
+    try:
+        runner.stop(cfg, state, name)
+    except RunnerError as exc:
+        _fail(exc)
+    finally:
+        _save_state(cfg, state)
+    typer.echo(f"{name}: stopped")
 
 
 @instance_app.command("status")
 def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
     """Show each instance: running, pinned versions, next scheduled restart."""
-    raise NotImplementedError("runner.is_running")
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    if not cfg.instances:
+        typer.echo("no instances configured")
+        return
+
+    for name, instance in cfg.instances.items():
+        running = runner.is_running(cfg, state, name)
+        marker = typer.style("running", fg=typer.colors.GREEN) if running else "stopped"
+        upcoming = runner.next_restart(instance)
+        when = upcoming.strftime("%Y-%m-%d %H:%M") if upcoming else "no schedule"
+        pins = state.pins.get(name, {})
+        versions = ", ".join(f"{k}={v}" for k, v in pins.items()) or "(none pinned)"
+        typer.echo(f"{name:<16} {marker:<18} port {instance.port}  next {when}")
+        typer.echo(f"{'':<16} {versions}")
 
 
 @instance_app.command("supervise")
-def instance_supervise(config_path: ConfigPath = Path("config.toml")) -> None:
+def instance_supervise(
+    config_path: ConfigPath = Path("config.toml"),
+    only: Annotated[
+        Optional[list[str]],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Option("--only", help="Supervise just these instances. Repeatable."),
+    ] = None,
+) -> None:
     """Run the supervision loop in the foreground."""
-    raise NotImplementedError("runner.supervise")
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    names = only or list(cfg.instances)
+    try:
+        runner.supervise(cfg, state, names)
+    except (RunnerError, InstanceError) as exc:
+        _fail(exc)
+    finally:
+        _save_state(cfg, state)
 
 
 # --- internals ---------------------------------------------------------------

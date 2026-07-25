@@ -11,7 +11,7 @@ import os
 import shutil
 from pathlib import Path
 
-from dzsm.config import Config
+from dzsm.config import Config, WorkshopMod
 from dzsm.state import State
 
 _log = logging.getLogger(__name__)
@@ -143,14 +143,6 @@ def _tree_size(path: Path) -> int:
     return total
 
 
-def refcounts(config: Config, state: State) -> dict[tuple[int, int], int]:
-    """Map (workshop_id, version) -> number of instances pinned to it.
-
-    Empty dict when nothing is pinned. Never False (Rule 1).
-    """
-    raise NotImplementedError("spec §8")
-
-
 def collect_garbage(config: Config, state: State, *, dry_run: bool = True) -> list[Path]:
     """Delete version directories that are unreferenced AND older than the retention
     window (config.gc_retention_days).
@@ -164,14 +156,104 @@ def collect_garbage(config: Config, state: State, *, dry_run: bool = True) -> li
     raise NotImplementedError("spec §8")
 
 
-def resolve_mod_paths(config: Config, state: State, instance_name: str) -> list[Path]:
+def resolve_mod_versions(config: Config, state: State, instance_name: str) -> dict[str, int]:
+    """Workshop mod name -> the version this instance should activate at its next start.
+
+    This is the activation decision, and the only moment it is ever made (spec §2). It
+    prefers the newest cached version, which is what makes a restart pick up whatever was
+    downloaded while the server was running. An explicit pinned_version in config wins
+    over that.
+
+    Local mods are absent from the result: they have no versions (spec §9).
+
+    Raises ModCacheError if a workshop mod has nothing usable on disk. Returns a dict,
+    empty when the instance has no workshop mods — never None (Rule 1).
+    """
+    instance = config.instances[instance_name]
+    versions: dict[str, int] = {}
+
+    for mod_name in instance.mods:
+        mod = config.mods[mod_name]
+        if not isinstance(mod, WorkshopMod):
+            continue
+
+        if mod.pinned_version is not None:
+            if not config.version_dir(mod.workshop_id, mod.pinned_version).is_dir():
+                raise ModCacheError(
+                    f"instance {instance_name!r}: mod {mod_name!r} is pinned to version "
+                    f"{mod.pinned_version} but that version is not in the cache"
+                )
+            versions[mod_name] = mod.pinned_version
+            continue
+
+        latest = state.latest_version(mod.workshop_id)
+        if latest is None:
+            raise ModCacheError(
+                f"instance {instance_name!r}: mod {mod_name!r} "
+                f"({mod.workshop_id}) has no cached version — run `dzsm mods update`"
+            )
+        versions[mod_name] = latest
+
+    return versions
+
+
+def mod_paths(config: Config, instance_name: str, versions: dict[str, int]) -> list[Path]:
     """Absolute paths for an instance's mods, in the instance's declared load order.
 
-    Workshop mods resolve to their currently pinned version directory; local mods
-    resolve to their configured path. The returned order is exactly the order in
-    InstanceConfig.mods and must not be sorted (spec §4).
+    The order is exactly InstanceConfig.mods and must never be sorted — it is the
+    semicolon order in -mod=, and framework mods have to precede their dependents
+    (spec §4).
 
-    Raises if a mod has no usable version on disk — a caller must not silently start a
-    server with a mod missing.
+    Raises ModCacheError if any path is missing, rather than quietly starting a server
+    with a mod absent.
     """
-    raise NotImplementedError("spec §4, §9")
+    instance = config.instances[instance_name]
+    paths: list[Path] = []
+
+    for mod_name in instance.mods:
+        mod = config.mods[mod_name]
+        if isinstance(mod, WorkshopMod):
+            version = versions.get(mod_name)
+            if version is None:
+                raise ModCacheError(
+                    f"instance {instance_name!r}: no version resolved for mod {mod_name!r}"
+                )
+            path = config.version_dir(mod.workshop_id, version)
+        else:
+            path = mod.path
+
+        if not path.is_dir():
+            raise ModCacheError(
+                f"instance {instance_name!r}: mod {mod_name!r} path does not exist: {path}"
+            )
+        paths.append(path)
+
+    return paths
+
+
+def refcounts(config: Config, state: State) -> dict[tuple[int, int], int]:
+    """Map (workshop_id, version) -> number of instances pinned to it.
+
+    Pins are keyed by the mod's config name while versions are keyed by workshop_id, so
+    this needs the Config to bridge them — which is why it lives here and not on State.
+
+    Empty dict when nothing is pinned. Never False (Rule 1).
+    """
+    counts: dict[tuple[int, int], int] = {}
+    for instance_pins in state.pins.values():
+        for mod_name, version in instance_pins.items():
+            mod = config.mods.get(mod_name)
+            if not isinstance(mod, WorkshopMod):
+                # The mod was removed from config, or turned into a local mod, while an
+                # instance was still pinned to it. Not fatal, but it means the version it
+                # points at is now unreferenced and eligible for GC — say so (Rule 3).
+                _log.warning(
+                    "mods: pin references unknown or non-workshop mod %r (version %s); "
+                    "its cache entry is now unreferenced",
+                    mod_name,
+                    version,
+                )
+                continue
+            key = (mod.workshop_id, version)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
