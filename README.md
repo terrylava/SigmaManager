@@ -32,8 +32,30 @@ verified against live Steam, the download path only against fakes.
 | `mods.py` | Promotion + reparse guard done; refcount/GC stubbed |
 | `instance.py` | Launch args done; layout + keys stubbed |
 | `runner.py` | Stub |
-| `cli.py` | `check`, `mods check/update/list` live; rest stubbed |
+| `cli.py` | `check`, `login`, `mods check/update/list` live; rest stubbed |
 | `api.py` | Deferred (spec §11) |
+
+## First run
+
+Seed Steam Guard once. steamcmd caches a sentry afterward, and every later dzsm command
+runs non-interactively:
+
+```bash
+dzsm login --interactive
+```
+
+Then verify it took:
+
+```bash
+dzsm login
+```
+
+If you would rather not rely on the credential cache, export the password instead —
+never put it in config.toml:
+
+```bash
+$env:DZSM_STEAM_PASSWORD = "..."
+```
 
 Three assumptions in spec §5 are unverified and gate real work. See CLAUDE.md.
 

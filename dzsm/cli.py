@@ -15,7 +15,15 @@ import typer
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.mods import ModCacheError, promote_snapshot
 from dzsm.state import State, StateError, load_state, save_state
-from dzsm.steam import SteamError, check_updates, download_mod, verify_download
+from dzsm.steam import (
+    SteamError,
+    SteamGuardRequired,
+    check_updates,
+    download_mod,
+    login_interactive,
+    verify_download,
+)
+from dzsm.steam import login as steam_login
 
 app = typer.Typer(
     name="dzsm",
@@ -67,6 +75,42 @@ def check(config_path: ConfigPath = Path("config.toml")) -> None:
     typer.echo(f"state       {cfg.state_file}")
     typer.echo(f"mods        {len(cfg.mods)}")
     typer.echo(f"instances   {', '.join(cfg.instances) or '(none)'}")
+
+
+@app.command()
+def login(
+    config_path: ConfigPath = Path("config.toml"),
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive",
+            "-i",
+            help="Hand the terminal to steamcmd so you can type your password and "
+            "Steam Guard code. Do this once; steamcmd caches a sentry afterward.",
+        ),
+    ] = False,
+) -> None:
+    """Verify the steamcmd login, or seed Steam Guard with --interactive.
+
+    Without --interactive this is non-interactive by design: steamcmd runs with stdin
+    closed, so a Guard prompt fails fast instead of hanging forever.
+    """
+    cfg = _load_config(config_path)
+    try:
+        if interactive:
+            typer.echo(f"Starting steamcmd for {cfg.steam.username}.")
+            typer.echo("Type your password and Steam Guard code directly into steamcmd.")
+            login_interactive(cfg.steam)
+        else:
+            steam_login(cfg.steam)
+    except SteamGuardRequired as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        typer.secho("Or run: dzsm login --interactive", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(1) from exc
+    except SteamError as exc:
+        _fail(exc)
+
+    typer.secho(f"logged in as {cfg.steam.username}", fg=typer.colors.GREEN)
 
 
 @mods_app.command("check")

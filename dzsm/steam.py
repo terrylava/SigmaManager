@@ -162,10 +162,46 @@ def login(steam: SteamConfig, *, timeout: float = 180.0) -> None:
     account that owns the game. Raises SteamGuardRequired if steamcmd prompts, with the
     interactive-seeding instructions in the message.
     """
-    password = _require_password(steam)
-    run = _run_steamcmd(steam, ["+login", steam.username, password, "+quit"], timeout=timeout)
+    run = _run_steamcmd(steam, [*_login_args(steam), "+quit"], timeout=timeout)
     _raise_for_output(run.output, context=f"login as {steam.username}")
+    if run.returncode != 0:
+        raise SteamError(
+            f"login as {steam.username} failed: steamcmd exited {run.returncode}\n"
+            f"{_tail(run.output)}"
+        )
     _log.info("steam: login as %s succeeded", steam.username)
+
+
+def login_interactive(steam: SteamConfig, *, timeout: float | None = None) -> None:
+    """Run steamcmd attached to the terminal so the user can complete Steam Guard.
+
+    This is the one place dzsm deliberately does NOT close stdin. It exists to seed the
+    sentry file once; every other steamcmd call in this module runs non-interactively
+    and fails fast rather than blocking on a prompt.
+
+    dzsm passes only the username. The password and the Guard code are typed by the user
+    straight into steamcmd — they are never read, logged, or stored here. steamcmd caches
+    a sentry afterward, which is what makes subsequent runs non-interactive.
+    """
+    if not steam.steamcmd_path.is_file():
+        raise SteamError(f"steamcmd not found at {steam.steamcmd_path}")
+
+    argv = [str(steam.steamcmd_path), "+login", steam.username, "+quit"]
+    _log.info("steam: starting interactive login for %s", steam.username)
+    try:
+        # No capture_output and no stdin redirect: steamcmd inherits this terminal.
+        proc = subprocess.run(argv, check=False, timeout=timeout)  # noqa: S603
+    except subprocess.TimeoutExpired as exc:
+        raise SteamError("interactive login timed out") from exc
+    except OSError as exc:
+        raise SteamError(f"could not run steamcmd at {steam.steamcmd_path}: {exc}") from exc
+
+    if proc.returncode != 0:
+        raise SteamError(
+            f"interactive login as {steam.username} failed: steamcmd exited "
+            f"{proc.returncode}. Check the output above."
+        )
+    _log.info("steam: interactive login as %s succeeded; sentry cached", steam.username)
 
 
 def download_mod(config: Config, workshop_id: int) -> DownloadResult:
@@ -176,16 +212,13 @@ def download_mod(config: Config, workshop_id: int) -> DownloadResult:
     run. It reports; verification judges.
     """
     steam = config.steam
-    password = _require_password(steam)
     acf_before = _mtime(config.workshop_acf)
 
     _log.info("steam: downloading mod %s", workshop_id)
     run = _run_steamcmd(
         steam,
         [
-            "+login",
-            steam.username,
-            password,
+            *_login_args(steam),
             "+workshop_download_item",
             str(WORKSHOP_APPID),
             str(workshop_id),
@@ -267,15 +300,23 @@ def update_server_app(config: Config) -> str:
 # --- internals ---------------------------------------------------------------
 
 
-def _require_password(steam: SteamConfig) -> str:
+def _login_args(steam: SteamConfig) -> list[str]:
+    """Build the +login arguments.
+
+    The password is optional on purpose: once `dzsm login --interactive` has seeded the
+    sentry, steamcmd can authenticate from its own cached credentials and dzsm never
+    needs to handle the password at all. When the env var is absent we omit it and let
+    steamcmd try the cache — if that fails, the login-failure markers produce a clear
+    error rather than a hang, because stdin is closed.
+    """
     password = steam.password()
     if not password:
-        raise SteamError(
-            f"Steam password not found: environment variable {steam.password_env} is "
-            f"unset or empty. The password is never read from config — export it, or "
-            f"point password_env at a different variable."
+        _log.debug(
+            "steam: %s is unset; relying on steamcmd's cached credentials",
+            steam.password_env,
         )
-    return password
+        return ["+login", steam.username]
+    return ["+login", steam.username, password]
 
 
 def _run_steamcmd(steam: SteamConfig, args: list[str], *, timeout: float) -> SteamCmdRun:

@@ -45,7 +45,15 @@ path in `-mod=`.
   strings. Only then promote a snapshot.
 - **Do not use anonymous Steam login.** DayZ requires an account that owns the game, for
   both the server app (223350) and workshop content (221100).
-- **Do not put the Steam password in config.** Env var or OS keyring only.
+- **Do not put the Steam password in config.** Env var or OS keyring only. Better still,
+  seed the sentry with `dzsm login --interactive` and set no env var at all — steamcmd
+  then authenticates from its own cache and dzsm never handles the password.
+- **`steam.login_interactive()` intentionally leaves stdin open. Do not "fix" it.**
+  Every other steamcmd call closes stdin so a Guard prompt fails fast instead of hanging.
+  That one function is the deliberate exception: it exists so the user can type their
+  password and Guard code straight into steamcmd, which is what seeds the sentry that
+  makes all the other calls work non-interactively. It also passes only the username —
+  dzsm must never read, log, or store the password there.
 - **Keep the root path short** (`D:\dz`, not a Documents subfolder). MAX_PATH is a real
   runtime failure here; config load validates it.
 
@@ -84,7 +92,8 @@ Runtime layout (under `root`, not the repo): `steamcmd/`, `serverapp/<version>/`
 
 **Milestone 1 complete.** `dzsm mods check` and `dzsm mods update` run the full path:
 Steam Web API `time_updated` lookup → steamcmd download → four-part verification →
-promotion to an immutable version directory → state save.
+promotion to an immutable version directory → state save. `dzsm login` verifies
+credentials, and `dzsm login --interactive` seeds Steam Guard.
 
 Also done: config models + validation, state models + atomic I/O,
 `is_reparse_point`/`safe_rmtree`, launch-arg construction, `mods list`.
