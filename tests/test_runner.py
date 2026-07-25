@@ -259,8 +259,9 @@ def test_start_creates_the_instance_layout(
 
     root = ready.instance_dir("chernarus")
     assert (root / "profiles").is_dir()
-    assert (root / "keys").is_dir()
     assert (root / "serverDZ.cfg").is_file()
+    # Keys go to the server installation, not here — the engine reads them from there.
+    assert not (root / "keys").exists()
 
 
 def test_start_rejects_an_unknown_instance(ready: Config) -> None:

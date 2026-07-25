@@ -58,7 +58,7 @@ def start(config: Config, state: State, instance_name: str) -> int:
             f"instance {instance_name!r} cannot start: {exc}"
         ) from exc
 
-    sync_keys(config, instance_name, paths)
+    sync_keys(config, state, instance_name, paths)
     argv = build_launch_args(config, instance_name, instance, exe, paths)
     _log.info("instance %s: starting on port %s", instance_name, instance.port)
     _log.debug("instance %s: argv %s", instance_name, argv)

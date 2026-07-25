@@ -168,7 +168,7 @@ Two details worth knowing before touching this code:
 | # | Assumption | Status |
 |---|---|---|
 | 1 | `-mod=` accepts absolute paths including drive letters | **CONFIRMED 2026-07-25** |
-| 2 | `.bikey` files must be copied into the instance's `keys/` when the mod lives outside the server dir | ~65%, open |
+| 2 | `.bikey` files go in the **server's** `keys/` dir, not the instance's | **CONFIRMED 2026-07-25** |
 | 3 | Native Linux DayZ server is viable on stable branch (sources conflict; may be experimental-only) | ~45%, open |
 
 **#1 is settled.** DayZ 1.29 server on `G:` loaded a CF version directory on `D:` with
@@ -177,9 +177,13 @@ Two details worth knowing before touching this code:
 signature errors. The per-instance-copy fallback is not needed; `instance.py` is
 unblocked, and `build_launch_args` is validated in shape.
 
-#2 is *not* settled by that test: a server loads its own mods without keys, and `keys/`
-governs whether a connecting **client's** mods are accepted. Answering it needs a client
-connection, not a server boot.
+**#2 is settled too**, by an actual client connection (a server boot cannot answer it —
+a server loads its own mods without keys; `keys/` governs whether a connecting *client's*
+mods are accepted). Keys go in `<server dir>/keys/`, which is inside a promoted
+`serverapp/<buildid>/` directory. **This is the only place dzsm writes into one**, and it
+is safe because it only ever adds: an existing key of the same name is skipped rather
+than re-copied (a running server may have it open), and keys are never deleted. Do not
+"tidy" that into an overwrite or a sync-with-delete.
 
 ### Build order (spec §11)
 

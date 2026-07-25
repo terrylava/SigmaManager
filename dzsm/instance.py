@@ -107,8 +107,9 @@ def ensure_layout(config: Config, state: State, instance_name: str) -> Path:
     tuned server config on every start would be its own kind of data loss.
     """
     root = config.instance_dir(instance_name)
-    for subdirectory in ("profiles", "keys"):
-        (root / subdirectory).mkdir(parents=True, exist_ok=True)
+    # No keys/ here: the engine reads keys from the server installation, so sync_keys
+    # targets <server dir>/keys/ instead.
+    (root / "profiles").mkdir(parents=True, exist_ok=True)
 
     instance = config.instances[instance_name]
     destination = root / instance.config_file
@@ -128,20 +129,33 @@ def ensure_layout(config: Config, state: State, instance_name: str) -> Path:
     return root
 
 
-def sync_keys(config: Config, instance_name: str, paths: list[Path]) -> list[Path]:
-    """Copy each mod's .bikey files into the instance's keys/ directory.
+def sync_keys(
+    config: Config, state: State, instance_name: str, paths: list[Path]
+) -> list[Path]:
+    """Add each mod's .bikey files to the *server's* keys/ directory.
 
-    Spec §5 item 2 is still open (~65%): a server loads its own mods without keys, so
-    item 1's confirmation says nothing about this. The keys directory governs whether a
-    connecting *client's* mods are accepted, which needs a client to test. Copying is
-    cheap and harmless either way, so dzsm does it rather than betting on the answer.
+    The engine reads keys from the server installation, not from -profiles, so they go to
+    `<server dir>/keys/`. That is inside a promoted `serverapp/<buildid>/` directory,
+    which everything else treats as immutable — deliberately excepted here, and safe:
 
-    Returns the keys placed — empty list if the mods ship none, never None (Rule 1).
+    - Keys are only ever **added**, never overwritten or deleted. The immutability rule
+      exists because a running server holds OS-level locks on files it has open; creating
+      a new small file alongside them breaks nothing.
+    - An existing key of the same name is left alone rather than re-copied, so a file a
+      running server may have open is never touched.
+
+    Consequence worth knowing: instances sharing a server build share one key set, so a
+    mod trusted on one instance is trusted on all of them. om.py avoided this by giving
+    every instance its own full server copy; this design trades that isolation for not
+    duplicating ~4 GiB per instance. Keys are tiny and accumulating them is harmless.
+
+    Returns the keys newly added — empty list when everything was already present, never
+    None (Rule 1).
     """
-    destination = config.instance_dir(instance_name) / "keys"
+    destination = server_directory(config, state) / "keys"
     destination.mkdir(parents=True, exist_ok=True)
 
-    placed: list[Path] = []
+    added: list[Path] = []
     for mod_path in paths:
         # Mods are inconsistent about the casing of this directory.
         for directory_name in ("keys", "Keys"):
@@ -150,17 +164,19 @@ def sync_keys(config: Config, instance_name: str, paths: list[Path]) -> list[Pat
                 continue
             for key in key_directory.glob("*.bikey"):
                 target = destination / key.name
+                if target.exists():
+                    continue
                 try:
                     shutil.copy2(key, target)
                 except OSError as exc:
                     # A key we cannot place is a client-side connection failure later,
                     # not a reason to abort the start (Rule 3, Rule 4).
                     _log.error(
-                        "instance %s: could not copy key %s: %s", instance_name, key, exc
+                        "instance %s: could not add key %s: %s", instance_name, key, exc
                     )
                     continue
-                placed.append(target)
+                added.append(target)
+                _log.info("instance %s: added key %s", instance_name, target.name)
             break
 
-    _log.debug("instance %s: %d key(s) in %s", instance_name, len(placed), destination)
-    return placed
+    return added

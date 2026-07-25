@@ -164,7 +164,7 @@ These are load-bearing assumptions that are not fully confirmed. Test them first
 | # | Assumption | Confidence | How to test |
 |---|-----------|-----------|-------------|
 | 1 | `-mod=` accepts absolute paths incl. drive letters | **CONFIRMED 2026-07-25** | Launch one instance with an absolute modcache path; check RPT for mod load lines and no signature errors |
-| 2 | `.bikey` files must be copied into the instance's `keys/` dir when the mod lives outside the server dir | ~65% | Run with `verifySignatures=2` and a mod outside the server dir; see if a client can connect |
+| 2 | `.bikey` files must be placed in the **server's** `keys/` dir when the mod lives outside the server dir | **CONFIRMED 2026-07-25** | Run with `verifySignatures=2` and a mod outside the server dir; see if a client can connect |
 | 3 | Native Linux DayZ server viability on stable branch | ~45% | Sources conflict. Bohemia's wiki documents `./DayZServer` for Linux, but other sources say the native Linux build is experimental-branch only and stable requires Wine/Proton. Confirm before committing to a Linux code path |
 
 **Test #1 command:**
@@ -198,6 +198,28 @@ not needed.** Activation stays "write a different path into `-mod=` at next rest
 Note this does *not* settle #2. The server loads its own mods without needing keys; the
 `keys/` directory governs whether a connecting *client's* mods are accepted, and no
 client was involved in this test.
+
+### Test #2 result — CONFIRMED, 2026-07-25
+
+Keys belong in the **server installation's** `keys/` directory — `<server dir>/keys/` —
+not in the instance directory. `-profiles` does not affect key lookup.
+
+Verified by connecting a real client to an instance running with `verifySignatures = 2`,
+CF loaded from `modcache/`, and CF's `Jacob_Mango_V3.bikey` placed next to vanilla
+`dayz.bikey` in `serverapp/<buildid>/keys/`. The client connected.
+
+**This is the one place dzsm writes into a promoted `serverapp/<buildid>/` directory**,
+which everything else treats as immutable. It is safe because the immutability rule
+exists to stop files being overwritten while a running server holds locks on them, and
+this only ever *adds* new files:
+
+- An existing key of the same name is skipped, never re-copied.
+- Keys are never deleted.
+
+Consequence: instances sharing a server build share one key set, so a mod trusted on one
+instance is trusted on all of them. om.py avoided this by giving each instance a full
+server copy; this design accepts the shared key set rather than duplicating ~4 GiB per
+instance. Keys are tiny and accumulating them is harmless.
 
 ---
 
