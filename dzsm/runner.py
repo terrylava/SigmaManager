@@ -23,6 +23,7 @@ from dzsm.config import Config, InstanceConfig
 from dzsm.instance import (
     build_launch_args,
     ensure_layout,
+    prepare_mission,
     prepare_server_directory,
     server_executable,
     sync_keys,
@@ -63,6 +64,7 @@ def start(
     )
     exe = server_executable(server_dir)
     ensure_layout(config, server_dir, instance_name)
+    mission = prepare_mission(config, server_dir, instance_name)
 
     versions = _versions_to_activate(config, state, instance_name)
     try:
@@ -100,10 +102,11 @@ def start(
         create_time=_create_time(process.pid),
     )
     _log.info(
-        "instance %s: started pid %s on server build %s with versions %s",
+        "instance %s: started pid %s on server build %s, mission %s, versions %s",
         instance_name,
         process.pid,
         build,
+        mission or "(shared)",
         versions or "(no workshop mods)",
     )
     return process.pid

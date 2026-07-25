@@ -37,6 +37,11 @@ path in `-mod=`.
 - **Do not build a shell string for the launch command, and never `shell=True`.** Use an
   argv list with `subprocess.Popen`. Python passes arguments verbatim, so backslashes,
   spaces, and drive letters are safe.
+- **`-config` must be absolute.** The working directory is the server installation, so a
+  bare `-config=serverDZ.cfg` resolves to the *server's* config and every instance
+  silently shares one — hostname, `instanceId`, `verifySignatures`, mission template, all
+  of it. This shipped as a real bug and was only caught because a per-instance mission
+  template failed to take effect. Same reasoning as `-mod=`: absolute or it is wrong.
 - **Do not sort or derive mod load order.** It is the order in `InstanceConfig.mods`,
   which is the semicolon order in `-mod=`. Framework mods load before dependents. The
   same applies to `server_mods` → `-serverMod=`; a mod belongs to one list or the other,
@@ -153,6 +158,15 @@ unset means the newest. Resolution is instance pin → `config.server_app_path` 
 downloaded, and the instance pin beats the global external path on purpose (more specific
 intent). The choice activates at start and lands in `state.server_builds`, exactly like
 mod versions — a new build never takes effect under a running server.
+
+**Missions are per-instance by default** (`per_instance_missions`). The engine has no
+mission path argument, so this means per-instance mission *names* — `<instance>.<terrain>`
+inside the server's `mpmissions/`, seeded once from a vanilla mission and never
+overwritten afterwards. Tens of MB, versus the several GB an isolated server costs.
+`storage_*` is excluded when seeding, since that is another server's saved world. dzsm
+owns the `template` line in the instance's serverDZ.cfg and keeps it pointed at the
+resolved mission — validating instead would leave a mismatched instance quietly running
+the shared one.
 
 **`isolated_server = true`** gives an instance a private copy of its build at
 `instances/<name>/server/`, so its own `keys/` and mission files. Without it, instances

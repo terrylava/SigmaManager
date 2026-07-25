@@ -102,6 +102,14 @@ class InstanceConfig(BaseModel):
     # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
     # for things like admin tools and server-side logic. Same ordering rule applies.
     server_mods: list[str] = Field(default_factory=list)
+    # Mission directory name for this instance, e.g. "pvp.chernarusplus". None derives
+    # "<instance>.<terrain>" from mission_source. dzsm keeps serverDZ.cfg's `template`
+    # pointed at whatever this resolves to.
+    mission: str | None = None
+    # The mission to seed this instance's copy from, by name under the server's
+    # mpmissions/. None uses whatever the server installation's own serverDZ.cfg names,
+    # i.e. the vanilla offline mission for that map.
+    mission_source: str | None = None
     # Pin this instance to a specific server build under serverapp/. None means the
     # newest downloaded build. Set it to hold production on a known-good build while a
     # test instance runs a newer one.
@@ -148,6 +156,11 @@ class Config(BaseModel):
     # installed by Steam. When unset, the server app is taken from
     # serverapp/<state.serverapp_version>/ instead.
     server_app_path: Path | None = None
+    # Give every instance its own mission directory, seeded from a vanilla one. On by
+    # default: mission folders hold types.xml, events.xml, cfgspawnabletypes.xml, init.c
+    # AND the persistence storage, so instances sharing one would clobber each other's
+    # economy and saves. Set false only if you deliberately want them shared.
+    per_instance_missions: bool = True
     # How often the supervision loop checks liveness and the restart schedule.
     supervise_poll_seconds: int = 15
     # Grace period for a server to shut down before it is killed. DayZ flushes

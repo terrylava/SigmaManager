@@ -8,6 +8,7 @@ just building this list with a different path in it.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -55,7 +56,11 @@ def build_launch_args(
     instance_root = config.instance_dir(instance_name)
     args = [
         str(server_exe),
-        f"-config={instance.config_file}",
+        # Absolute, not the bare filename. The working directory is the server
+        # installation, so a relative -config resolves to the *server's* serverDZ.cfg and
+        # every instance silently shares one — including hostname, instanceId,
+        # verifySignatures, and the mission template.
+        f"-config={instance_root / instance.config_file}",
         f"-port={instance.port}",
         build_mod_argument(mod_paths),
     ]
@@ -215,6 +220,123 @@ def ensure_layout(config: Config, server_dir: Path, instance_name: str) -> Path:
             )
 
     return root
+
+
+TEMPLATE_PATTERN = re.compile(r'^(\s*template\s*=\s*)"([^"]*)"', re.MULTILINE)
+DEFAULT_TERRAIN = "chernarusplus"
+
+
+def _ignore_persistence(directory: str, names: list[str]) -> set[str]:
+    """Skip storage_* when seeding a mission — that is another server's saved world."""
+    return {name for name in names if name.startswith("storage_")}
+
+
+def read_template(config_file: Path) -> str | None:
+    """The mission named by a serverDZ.cfg's `template`, or None."""
+    try:
+        text = config_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = TEMPLATE_PATTERN.search(text)
+    return match.group(2) if match else None
+
+
+def write_template(config_file: Path, mission: str) -> None:
+    """Point a serverDZ.cfg's `template` at a mission, preserving everything else.
+
+    dzsm owns this one line. An instance whose template does not match its own mission
+    directory would silently run a shared one, which is the collision per-instance
+    missions exist to prevent — so it is kept in sync rather than merely validated.
+    """
+    text = config_file.read_text(encoding="utf-8", errors="replace")
+    replacement = f'\\g<1>"{mission}"'
+    if TEMPLATE_PATTERN.search(text):
+        updated = TEMPLATE_PATTERN.sub(replacement, text, count=1)
+    else:
+        updated = text.rstrip("\n") + f'\ntemplate="{mission}";\n'
+    if updated != text:
+        config_file.write_text(updated, encoding="utf-8")
+
+
+def prepare_mission(config: Config, server_dir: Path, instance_name: str) -> str | None:
+    """Give this instance its own mission directory, seeded from a vanilla one.
+
+    Mission folders hold types.xml, events.xml, cfgspawnabletypes.xml, init.c *and* the
+    persistence storage, so instances sharing one clobber each other's economy and saves.
+    Different maps per instance is the common case — a set of servers sharing mods but
+    running different terrains with their own loot tables.
+
+    The engine has no mission path argument: it resolves `mpmissions/<template>` relative
+    to the server directory. Per-instance missions therefore mean per-instance mission
+    *names* inside that directory, which is also why this costs tens of MB rather than
+    the several GB of a full isolated server.
+
+    Never overwrites an existing mission directory — once seeded, it is yours to edit.
+    Returns the mission name, or None when the feature is off.
+    """
+    instance = config.instances[instance_name]
+    if not config.per_instance_missions and instance.mission is None:
+        return None
+
+    missions = server_dir / "mpmissions"
+    if not missions.is_dir():
+        # Nothing to seed from. Not an error: the server simply ships no missions, and
+        # failing the start over it would be worse than running whatever it does have.
+        _log.warning(
+            "instance %s: %s does not exist, skipping per-instance mission setup",
+            instance_name,
+            missions,
+        )
+        return None
+
+    available = sorted(p.name for p in missions.iterdir() if p.is_dir())
+    # Ordered candidates for what to copy from. The first that actually exists wins —
+    # "exists" matters because after the first run the instance's own template names its
+    # per-instance mission, and if that directory is later deleted the instance must be
+    # able to fall back and re-seed rather than deadlocking on a missing source.
+    if instance.mission_source is not None:
+        # Explicitly configured: a name that does not exist is a config mistake, and
+        # quietly substituting something else would hide it.
+        if not (missions / instance.mission_source).is_dir():
+            raise InstanceError(
+                f"instance {instance_name!r}: mission_source "
+                f"{instance.mission_source!r} not found in {missions}. Available: "
+                f"{', '.join(available) or 'none'}"
+            )
+        source_name: str | None = instance.mission_source
+    else:
+        candidates = [
+            read_template(config.instance_dir(instance_name) / instance.config_file),
+            read_template(server_dir / "serverDZ.cfg"),
+            available[0] if len(available) == 1 else None,
+        ]
+        source_name = next(
+            (name for name in candidates if name and (missions / name).is_dir()), None
+        )
+
+    if source_name is None:
+        raise InstanceError(
+            f"instance {instance_name!r}: no usable mission to seed from. Set "
+            f"mission_source to one of: {', '.join(available) or 'none'}"
+        )
+
+    source = missions / source_name
+
+    terrain = source_name.split(".", 1)[1] if "." in source_name else DEFAULT_TERRAIN
+    mission = instance.mission or f"{instance_name}.{terrain}"
+    target = missions / mission
+
+    if not target.exists():
+        _log.info(
+            "instance %s: seeding mission %s from %s", instance_name, mission, source_name
+        )
+        # Persistence lives in storage_<instanceId>/ inside the mission. Copying it would
+        # hand this instance another server's saved world, so a seeded mission starts
+        # empty and the engine creates its own on first run.
+        promote_tree(source, target, ignore=_ignore_persistence)
+
+    write_template(config.instance_dir(instance_name) / instance.config_file, mission)
+    return mission
 
 
 def sync_keys(server_dir: Path, instance_name: str, paths: list[Path]) -> list[Path]:

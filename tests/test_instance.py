@@ -69,6 +69,23 @@ def test_launch_args_is_a_list_of_separate_arguments() -> None:
     assert "-freezecheck" in args
 
 
+def test_config_path_is_absolute_not_a_bare_filename() -> None:
+    """The working directory is the server installation, so a relative -config resolves
+    to the *server's* serverDZ.cfg and every instance silently shares one."""
+    args = build_launch_args(
+        _config(),
+        "chernarus",
+        InstanceConfig(port=2302, mods=[]),
+        Path(r"D:\dz\serverapp\1\DayZServer_x64.exe"),
+        [],
+    )
+    config_arg = next(a for a in args if a.startswith("-config="))
+    value = Path(config_arg.removeprefix("-config="))
+
+    assert value.is_absolute()
+    assert value == Path(r"D:\dz\instances\chernarus\serverDZ.cfg")
+
+
 def test_profiles_points_inside_the_instance_directory() -> None:
     args = build_launch_args(
         _config(),

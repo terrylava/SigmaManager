@@ -407,6 +407,33 @@ The guard lives in `delete_version` as well as `remove_mod`, deliberately: a per
 delete would otherwise walk straight around a whole-mod protection and destroy the very
 cache the keep exists to preserve.
 
+### Per-instance missions
+
+**On by default** (`per_instance_missions`). Mission folders hold `types.xml`,
+`events.xml`, `cfgspawnabletypes.xml`, `cfgeconomycore.xml`, `init.c` — and the
+persistence storage. Instances sharing one clobber each other's economy and saves. The
+motivating case: several servers sharing a mod set but running different maps, each with
+its own loot tables.
+
+The engine has no mission path argument — it resolves `mpmissions/<template>` relative to
+the server directory. So per-instance missions mean per-instance mission *names* inside
+that directory: `<instance>.<terrain>`, seeded once from a vanilla mission. That costs
+tens of MB rather than the several GB an isolated server copy would.
+
+- `mission` overrides the derived name; `mission_source` overrides what it is seeded from.
+- An existing mission directory is **never overwritten** — once seeded it is yours to edit,
+  and a restart must not revert a tuned economy.
+- `storage_*` is excluded when seeding: that is another server's saved world.
+- dzsm keeps the instance's `serverDZ.cfg` `template` pointed at the resolved mission.
+  Validating instead of writing would leave a mismatched instance silently running the
+  shared mission, which is the collision this exists to prevent.
+
+**`-config` must be an absolute path.** The working directory is the server installation,
+so a bare `-config=serverDZ.cfg` resolves to the *server's* config and every instance
+silently shares one — hostname, `instanceId`, `verifySignatures`, and the mission template
+included. This was a real bug, found only because a per-instance template failed to take
+effect.
+
 ### Choosing a server build per instance
 
 The server app is versioned like mods, so instances select from it the same way.

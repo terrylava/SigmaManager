@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +53,13 @@ def safe_rmtree(path: Path) -> None:
     shutil.rmtree(path)
 
 
-def promote_tree(source: Path, destination: Path, *, strategy: str = "copy") -> Path:
+def promote_tree(
+    source: Path,
+    destination: Path,
+    *,
+    strategy: str = "copy",
+    ignore: Callable[[str, list[str]], set[str]] | None = None,
+) -> Path:
     """Copy a directory to an immutable destination, atomically from the reader's view.
 
     Copies into a staging directory and renames into place, so an interrupted copy can
@@ -71,7 +77,9 @@ def promote_tree(source: Path, destination: Path, *, strategy: str = "copy") -> 
 
     copy_function = os.link if strategy == "hardlink" else shutil.copy2
     try:
-        shutil.copytree(source, staging, copy_function=copy_function, symlinks=True)
+        shutil.copytree(
+            source, staging, copy_function=copy_function, symlinks=True, ignore=ignore
+        )
         staging.replace(destination)
     except OSError as exc:
         try:
