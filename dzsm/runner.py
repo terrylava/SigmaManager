@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import subprocess
+import sys
 import threading
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -72,7 +73,7 @@ def start(
     server_dir, build = prepare_server_directory(
         config, state, instance_name, refresh=refresh_server
     )
-    exe = server_executable(server_dir)
+    exe = server_executable(server_dir, instance.server_executable)
     ensure_layout(config, server_dir, instance_name)
     mission = prepare_mission(config, server_dir, instance_name)
     # Before launch: BattlEye reads this at startup, so a password generated afterwards
@@ -107,6 +108,8 @@ def start(
         )
     except OSError as exc:
         raise RunnerError(f"instance {instance_name!r} failed to start: {exc}") from exc
+
+    _apply_process_tuning(instance, process.pid, instance_name)
 
     state.pins[instance_name] = dict(versions)
     state.server_builds[instance_name] = build
@@ -525,6 +528,89 @@ def _warn_players(
         warned[instance_name] = now
     finally:
         client.close()
+
+
+def priority_value(name: str) -> int:
+    """Map a priority name to what psutil.nice() wants on this platform.
+
+    Windows takes priority *classes*; POSIX takes nice values, where lower is higher
+    priority — the inversion is the whole reason this mapping exists rather than a raw
+    number in config.
+    """
+    if sys.platform == "win32":
+        classes = {
+            "idle": psutil.IDLE_PRIORITY_CLASS,
+            "below_normal": psutil.BELOW_NORMAL_PRIORITY_CLASS,
+            "normal": psutil.NORMAL_PRIORITY_CLASS,
+            "above_normal": psutil.ABOVE_NORMAL_PRIORITY_CLASS,
+            "high": psutil.HIGH_PRIORITY_CLASS,
+            "realtime": psutil.REALTIME_PRIORITY_CLASS,
+        }
+        return int(classes[name])
+    nice = {
+        "idle": 19,
+        "below_normal": 10,
+        "normal": 0,
+        "above_normal": -5,
+        "high": -10,
+        "realtime": -20,
+    }
+    return nice[name]
+
+
+def _apply_process_tuning(instance: InstanceConfig, pid: int, instance_name: str) -> None:
+    """Set CPU affinity and priority on a freshly started server.
+
+    Never fatal: a server running on the wrong cores is worth far more than a server that
+    refused to start because affinity could not be set. Both are applied after spawning
+    because there is no portable way to ask Popen for them.
+    """
+    if instance.cpu_affinity is None and instance.priority is None:
+        return
+
+    try:
+        process = psutil.Process(pid)
+    except psutil.Error as exc:
+        _log.error("instance %s: could not tune process %s: %s", instance_name, pid, exc)
+        return
+
+    if instance.cpu_affinity is not None:
+        available = psutil.cpu_count() or 1
+        cores = sorted({core for core in instance.cpu_affinity if 0 <= core < available})
+        ignored = sorted(set(instance.cpu_affinity) - set(cores))
+        if ignored:
+            _log.warning(
+                "instance %s: ignoring cores %s, this machine has %s",
+                instance_name,
+                ignored,
+                available,
+            )
+        if not cores:
+            _log.error(
+                "instance %s: cpu_affinity names no core this machine has; leaving it "
+                "on all %s",
+                instance_name,
+                available,
+            )
+        else:
+            try:
+                process.cpu_affinity(cores)
+                _log.info("instance %s: pinned to cores %s", instance_name, cores)
+            except (psutil.Error, OSError) as exc:
+                _log.error("instance %s: could not set cpu affinity: %s", instance_name, exc)
+
+    if instance.priority is not None:
+        try:
+            process.nice(priority_value(instance.priority))
+            _log.info("instance %s: priority %s", instance_name, instance.priority)
+        except (psutil.Error, OSError) as exc:
+            # Raising priority usually needs privilege; saying so beats a bare errno.
+            _log.error(
+                "instance %s: could not set priority %s (this usually needs elevation): %s",
+                instance_name,
+                instance.priority,
+                exc,
+            )
 
 
 def _due_at(config: Config, state: State, instance_name: str) -> datetime | None:

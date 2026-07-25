@@ -115,8 +115,14 @@ function instanceRow(i) {
     ? '<button class="danger" onclick="act.stop(\'' + n + '\')"' + d + '>Stop</button>'
       + '<button onclick="act.restart(\'' + n + '\')"' + d + '>Restart</button>'
     : '<button class="primary" onclick="act.start(\'' + n + '\')"' + d + '>Start</button>';
+  const tuning = [];
+  if (i.cpu_affinity) tuning.push('cores ' + i.cpu_affinity.join(','));
+  if (i.priority) tuning.push(esc(i.priority));
+  if (i.cpu_count) tuning.push(i.cpu_count + ' threads');
+  if (i.server_executable) tuning.push(esc(i.server_executable));
   return '<tr>'
     + '<td>' + n
+      + (tuning.length ? '<br><span class="note">' + tuning.join(' &middot; ') + '</span>' : '')
     + '<td>' + state
     + '<td>' + i.port + (i.rcon_port ? ' <span class="note">rcon ' + i.rcon_port + '</span>' : '')
     + '<td><code>' + esc(pins) + '</code>'

@@ -18,6 +18,15 @@ snapshot_strategy = "copy"
 # vanilla one. On by default: mission folders hold types.xml, events.xml, init.c AND the
 # persistence storage, so instances sharing one clobber each other's economy and saves.
 per_instance_missions = true
+
+# Which server application to download. 223350 is the stable DayZ server; the
+# experimental server is a different app id. Change both together with server_branch if
+# you are chasing a beta.
+# server_appid = 223350
+# Steam beta branch for the server app. Omit for the public branch. Builds from different
+# branches land in separate serverapp/<buildid>/ directories, so instances can be pinned
+# to whichever they need with server_build.
+# server_branch = "experimental"
 # Prefix for derived mission names, so dzsm's are obvious next to vanilla's dayzOffline.*
 # ones: "sigma_chernarus.chernarusplus". The instance name stays in it — a bare prefix
 # would put every instance back on one shared mission.
@@ -119,6 +128,28 @@ restart_schedule = ["04:00", "10:00", "16:00", "22:00"]
 # Also restart this many hours after the instance starts, independently of the schedule
 # above — whichever comes first wins. Defaults to 4. Set to nothing to disable.
 restart_after_hours = 4
+
+# Which CPU cores this instance may run on, as core numbers rather than an affinity
+# bitmask. Omit to use every core. Cores this machine does not have are ignored, so a
+# config written for a bigger box still starts here.
+# cpu_affinity = [0, 1, 2, 3]
+# Scheduling priority: idle, below_normal, normal, above_normal, high, realtime.
+# Raising it usually needs elevation; failing to is logged, never fatal. "realtime" can
+# starve the machine, including whatever you would use to stop the server.
+# priority = "above_normal"
+# -cpuCount. Separate from cpu_affinity: that is which cores the OS may use, this is how
+# many threads the engine spawns.
+# cpu_count = 4
+
+# Standard logging flags, all on by default. -netlog is the noisy one.
+dologs = true
+adminlog = true
+netlog = true
+freezecheck = true
+
+# Run a different binary from the same server directory, e.g. a diagnostic build that
+# ships alongside the normal one.
+# server_executable = "DayZDiag_x64.exe"
 
 [instances.testing]
 port = 2402

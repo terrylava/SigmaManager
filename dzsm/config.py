@@ -189,6 +189,26 @@ class InstanceConfig(BaseModel):
     keep_mods: list[str] = Field(default_factory=list)
     # "HH:MM" local times.
     restart_schedule: list[str] = Field(default_factory=list)
+    # CPU cores this instance may run on, as core numbers: [0, 1, 2, 3]. None lets it use
+    # every core. Numbers rather than the affinity bitmask, because nobody should have to
+    # work out that cores 0-3 are 0xF.
+    cpu_affinity: list[int] | None = None
+    # Scheduling priority. "high" is usually as far as anyone should go; "realtime" can
+    # starve the rest of the machine, including whatever you would use to stop it.
+    priority: Literal[
+        "idle", "below_normal", "normal", "above_normal", "high", "realtime"
+    ] | None = None
+    # -cpuCount. Independent of cpu_affinity: affinity is which cores the OS may use,
+    # this is how many threads the engine spawns.
+    cpu_count: int | None = None
+    # Standard DayZ logging flags, all on by default because a server without them is
+    # much harder to debug after the fact.
+    dologs: bool = True
+    adminlog: bool = True
+    netlog: bool = True
+    freezecheck: bool = True
+    # Override the server binary name, e.g. "DayZDiag_x64.exe" for a diagnostic build.
+    server_executable: str | None = None
     # Restart this many hours after the instance started. Independent of
     # restart_schedule; when both are set, whichever comes first wins. None disables it.
     restart_after_hours: float | None = 4.0
@@ -218,6 +238,17 @@ class Config(BaseModel):
     allow_long_root: bool = False
     # steamcmd can legitimately take a long time on a big mod.
     download_timeout_seconds: int = 3600
+    # Which server application to download. 223350 is the stable DayZ server; the
+    # experimental server is a different app. Configurable rather than hardcoded so a
+    # branch or app change does not need a new release.
+    server_appid: int = SERVER_APPID
+    # Steam beta branch for the server app, passed to steamcmd as `-beta <name>`. None
+    # is the default (public) branch. Builds from different branches land in separate
+    # serverapp/<buildid>/ directories like any other, so instances can be pinned to
+    # whichever they need.
+    server_branch: str | None = None
+    # Password for a locked beta branch, if one needs it.
+    server_branch_password_env: str = "DZSM_BRANCH_PASSWORD"  # noqa: S105 — a var name
     # Path to an existing DayZ server installation. Interim: until update_server_app()
     # lands, dzsm cannot download appid 223350 itself, so instances run against a server
     # installed by Steam. When unset, the server app is taken from
@@ -375,6 +406,13 @@ class Config(BaseModel):
                     f"temporarily disabled"
                 )
         return self
+
+    @field_validator("server_branch")
+    @classmethod
+    def _branch_must_be_a_simple_name(cls, v: str | None) -> str | None:
+        if v is not None and (not v or any(c.isspace() for c in v)):
+            raise ValueError(f"server_branch must be a branch name with no spaces, got {v!r}")
+        return v
 
     @field_validator("mission_prefix")
     @classmethod

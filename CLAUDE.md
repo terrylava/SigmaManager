@@ -269,6 +269,18 @@ the main one, so a Ctrl-C or service stop shuts both down. Three properties it m
   another thread of the same process; without the reload, the supervisor's older copy
   would overwrite those changes at its next save.
 
+**`cpu_affinity` is core numbers, not a bitmask**, and `priority` is a name, not a number
+— Windows wants priority classes while POSIX wants nice values where lower is higher, so
+the mapping lives in `runner.priority_value`. Both are applied after spawning and **never
+fatal**: raising priority usually needs elevation, and a server at normal priority beats
+one that refused to start. Cores the machine lacks are dropped; if none are left the
+instance stays on all of them.
+
+**Launch flags are config, not constants.** `dologs`/`adminlog`/`netlog`/`freezecheck`
+default on. `server_appid` + `server_branch` pick stable vs experimental (different app
+id, plus steamcmd `-beta`), and `server_executable` per instance runs a diagnostic binary
+from the same directory.
+
 **`dzsm gui` is the browser entry point**: creates a config if missing, supervises, serves,
 and opens the dashboard. The dashboard has controls (start/stop/restart, mods check/update,
 server update) which post to the same API routes the CLI uses. Steam Guard and editing

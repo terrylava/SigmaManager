@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import psutil
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -178,6 +179,10 @@ def create_app(config_path: Path) -> FastAPI:
                     "server_mods": instance.server_mods,
                     "pins": state.pins.get(name, {}),
                     "rcon_port": instance.resolved_rcon_port(),
+                    "cpu_affinity": instance.cpu_affinity,
+                    "priority": instance.priority,
+                    "cpu_count": instance.cpu_count,
+                    "server_executable": instance.server_executable,
                     "server_build": state.server_builds.get(name),
                     "server_build_pin": instance.server_build,
                     "isolated_server": instance.isolated_server,
@@ -250,6 +255,10 @@ def create_app(config_path: Path) -> FastAPI:
             "builds": builds,
             "active": state.serverapp_version,
             "server_app_path": str(config.server_app_path) if config.server_app_path else None,
+            "appid": config.server_appid,
+            "branch": config.server_branch,
+            # So the dashboard can offer real core numbers rather than asking for a mask.
+            "cpu_count": psutil.cpu_count(),
         }
 
     @app.get("/api/jobs")

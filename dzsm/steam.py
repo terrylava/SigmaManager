@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from dzsm.config import SERVER_APPID, WORKSHOP_APPID, Config, SteamConfig
+from dzsm.config import WORKSHOP_APPID, Config, SteamConfig
 
 _log = logging.getLogger(__name__)
 
@@ -398,12 +398,19 @@ def update_server_app(config: Config, *, validate: bool = False) -> str:
     Returns the buildid. Raises SteamError on any failure; never returns a version that
     was not actually installed (Rule 1).
     """
+    appid = config.server_appid
     download_dir = config.serverapp_download_dir
     download_dir.mkdir(parents=True, exist_ok=True)
-    manifest = download_dir / "steamapps" / f"appmanifest_{SERVER_APPID}.acf"
+    manifest = download_dir / "steamapps" / f"appmanifest_{appid}.acf"
     build_before = _read_buildid(manifest)
 
-    _log.info("steam: updating server app %s into %s", SERVER_APPID, download_dir)
+    branch = config.server_branch
+    _log.info(
+        "steam: updating server app %s (%s branch) into %s",
+        appid,
+        branch or "public",
+        download_dir,
+    )
     args = [
         # force_install_dir must precede app_update, and steamcmd is happier with it
         # before login too.
@@ -411,14 +418,20 @@ def update_server_app(config: Config, *, validate: bool = False) -> str:
         str(download_dir),
         *_login_args(config.steam),
         "+app_update",
-        str(SERVER_APPID),
+        str(appid),
     ]
+    if branch is not None:
+        # -beta must follow the appid, not precede it.
+        args += ["-beta", branch]
+        password = os.environ.get(config.server_branch_password_env)
+        if password:
+            args += ["-betapassword", password]
     if validate:
         args.append("validate")
     args.append("+quit")
 
     run = _run_steamcmd(config.steam, args, timeout=float(config.download_timeout_seconds))
-    _raise_for_output(run.output, context=f"server app {SERVER_APPID} update")
+    _raise_for_output(run.output, context=f"server app {appid} update")
     if run.returncode not in (0, STEAMCMD_SELF_UPDATE_EXIT):
         raise SteamError(
             f"server app update failed: steamcmd exited {run.returncode}\n"

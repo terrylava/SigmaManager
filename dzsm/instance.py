@@ -72,14 +72,24 @@ def build_launch_args(
     if server_mod_paths:
         args.append(build_mod_argument(server_mod_paths, option="serverMod"))
 
-    args += [
-        f"-profiles={instance_root / 'profiles'}",
-        "-dologs",
-        "-adminlog",
-        "-netlog",
-        "-freezecheck",
-        *instance.extra_args,
-    ]
+    args.append(f"-profiles={instance_root / 'profiles'}")
+
+    if instance.cpu_count is not None:
+        args.append(f"-cpuCount={instance.cpu_count}")
+
+    # Toggleable rather than hardcoded: they are on by default because a server without
+    # logs is much harder to diagnose, but -netlog in particular is noisy enough that
+    # people turn it off on a busy server.
+    for flag, enabled in (
+        ("dologs", instance.dologs),
+        ("adminlog", instance.adminlog),
+        ("netlog", instance.netlog),
+        ("freezecheck", instance.freezecheck),
+    ):
+        if enabled:
+            args.append(f"-{flag}")
+
+    args += instance.extra_args
     return args
 
 
@@ -243,12 +253,24 @@ def _restore_missions(stash: Path, destination: Path, instance_name: str) -> Non
     safe_rmtree(stash)
 
 
-def server_executable(server_dir: Path) -> Path:
-    """Absolute path to the server binary inside a prepared server directory."""
-    name = "DayZServer_x64.exe" if sys.platform == "win32" else "DayZServer"
+def server_executable(server_dir: Path, override: str | None = None) -> Path:
+    """Absolute path to the server binary inside a prepared server directory.
+
+    `override` names a different binary in the same directory — a diagnostic build, say,
+    which ships alongside the normal one rather than as its own download.
+    """
+    name = override or ("DayZServer_x64.exe" if sys.platform == "win32" else "DayZServer")
     exe = server_dir / name
     if not exe.is_file():
-        raise InstanceError(f"server executable not found: {exe}")
+        available = (
+            sorted(p.name for p in server_dir.glob("*") if p.is_file() and p.suffix in {"", ".exe"})
+            if server_dir.is_dir()
+            else []
+        )
+        raise InstanceError(
+            f"server executable not found: {exe}"
+            + (f". Binaries there: {', '.join(available)}" if override and available else "")
+        )
     return exe
 
 

@@ -481,6 +481,40 @@ The server usually dies before answering `#shutdown`, so a missing reply is not 
 failure — whether it worked is decided by watching the process, not by the reply. RCON not
 being configured, or being unreachable, simply falls through to signalling.
 
+### Process tuning
+
+`cpu_affinity` takes **core numbers** — `[0, 1, 2, 3]` — not an affinity bitmask. Nobody
+should have to work out that cores 0-3 are `0xF`. Cores the machine does not have are
+dropped with a warning, so a config written for a 16-core box still starts on a 4-core
+one; if none of the listed cores exist the instance is left on all of them, since pinning
+to nothing is worse than pinning to everything.
+
+`priority` takes a name — `idle` through `realtime`. Windows wants priority *classes* and
+POSIX wants nice values, where lower means higher priority; the inversion is exactly why
+config takes a name rather than a number.
+
+Both are applied after spawning, because there is no portable way to ask `Popen` for them,
+and **neither is ever fatal**. Raising priority usually needs elevation, and a server
+running at normal priority beats a server that refused to start.
+
+`-cpuCount` is separate from affinity and both are configurable: affinity is which cores
+the OS may schedule on, `cpu_count` is how many threads the engine spawns.
+
+The logging flags (`dologs`, `adminlog`, `netlog`, `freezecheck`) are toggleable rather
+than hardcoded, all on by default — `-netlog` is the one people turn off on a busy server.
+
+### Server branches and binaries
+
+`server_appid` and `server_branch` choose what gets downloaded: the experimental server is
+a different app id, and beta branches go through steamcmd's `-beta`. Builds from different
+branches land in separate `serverapp/<buildid>/` directories like any other, so an
+instance can be pinned to whichever it needs with `server_build` — stable and experimental
+side by side, no reinstalling.
+
+`server_executable` per instance runs a different binary from the same directory, which is
+how a diagnostic build works: it ships alongside the normal one rather than as its own
+download.
+
 ### Stopping means stopping
 
 `dzsm instance stop` **holds the instance down**: the supervisor will not restart it, on
