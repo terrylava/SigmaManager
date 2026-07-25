@@ -176,4 +176,4 @@ def test_interactive_login_still_rejects_other_nonzero_exits(
 def test_login_fails_clearly_on_a_missing_config(tmp_path: Path) -> None:
     result = runner.invoke(cli.app, ["login", "--config", str(tmp_path / "nope.toml")])
     assert result.exit_code == 1
-    assert "cannot read config" in result.output
+    assert "no config at" in result.output

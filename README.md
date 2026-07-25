@@ -145,12 +145,33 @@ $env:DZSM_STEAM_PASSWORD = "..."
 
 Three assumptions in spec §5 are unverified and gate real work. See CLAUDE.md.
 
-## Setup
+## Getting started
+
+With the standalone binary (see below), or after installing from source:
+
+```bash
+dzsm init
+```
+
+It asks where things should live and which Steam account owns DayZ, writes a
+`config.toml` that already validates, and prints what to do next:
+
+```
+  1. dzsm login --interactive     seed Steam Guard once
+  2. dzsm server update           download the DayZ server (~4 GB)
+  3. dzsm instance start server1  start the vanilla server it made for you
+```
+
+That gets a vanilla server running. Then add mods and instances to `config.toml`,
+`dzsm mods update` to download them, and `dzsm daemon` to keep everything up with a web
+dashboard.
+
+## From source
 
 Requires Python 3.11+.
 
 ```bash
-python -m venv .venv && .venv\Scripts\activate && pip install -e ".[dev]"
+python -m venv .venv && .venv\Scripts\activate && pip install -e ".[dev,web]"
 ```
 
 ## Checks

@@ -90,6 +90,117 @@ def main(
 
 
 @app.command()
+def init(
+    config_path: ConfigPath = Path("config.toml"),
+    root: Annotated[
+        Optional[str],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Option("--root", help="Where mods, server builds, and instances live."),
+    ] = None,
+    username: Annotated[
+        Optional[str],  # noqa: UP045
+        typer.Option("--username", help="Steam account that owns DayZ."),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite an existing config.")
+    ] = False,
+) -> None:
+    """Create a starter config and print what to do next.
+
+    This is the first command to run. Everything else needs a config, and there is no
+    useful default for where your servers should live or which Steam account owns DayZ.
+    """
+    if config_path.exists() and not force:
+        _fail(
+            ValueError(
+                f"{config_path} already exists. Edit it, or pass --force to replace it."
+            )
+        )
+
+    if root is None:
+        typer.echo("Where should mods, server builds, and instances live?")
+        typer.echo("Keep it short — deep mod paths hit the Windows 260-character limit.")
+        root = typer.prompt("  root", default=f"{Path.cwd().anchor}dz")
+
+    if username is None:
+        typer.echo("")
+        typer.echo("Steam account name that owns DayZ (anonymous login does not work).")
+        username = typer.prompt("  username")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_starter_config(root, username), encoding="utf-8")
+    typer.secho(f"wrote {config_path}", fg=typer.colors.GREEN)
+
+    # Validate what we just wrote rather than assuming — a root that fails the path
+    # length check should be caught here, not three commands later.
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        typer.secho("Edit the file and re-run `dzsm check`.", fg=typer.colors.YELLOW)
+        raise typer.Exit(1) from exc
+
+    typer.echo("")
+    typer.echo(f"Everything will live under {cfg.root}")
+    typer.echo("")
+    typer.secho("Next:", bold=True)
+    typer.echo("  1. dzsm login --interactive     seed Steam Guard once")
+    typer.echo("  2. dzsm server update           download the DayZ server (~4 GB)")
+    typer.echo("  3. dzsm instance start server1  start the vanilla server it made for you")
+    typer.echo("")
+    typer.echo(f"Then add mods and more instances in {config_path}, and:")
+    typer.echo("  dzsm mods update                download them")
+    typer.echo("  dzsm daemon                     keep everything up, with a web dashboard")
+
+
+def _starter_config(root: str, username: str) -> str:
+    """A config that works as written, with one vanilla instance to start.
+
+    TOML single quotes are *literal* strings, so Windows paths go in verbatim — escaping
+    the backslashes would put two of them in the value. Kept to plain ASCII as well:
+    this is a file people open in whatever editor Windows gives them.
+    """
+    root = root.rstrip("\\/")
+    separator = "\\" if "\\" in root or ":" in root else "/"
+    return f"""\
+# dzsm configuration. Run `dzsm check` after editing to validate it.
+
+# Everything dzsm manages lives here: steamcmd, downloaded server builds, the mod cache,
+# and per-instance files. Keep the path short - mod trees are deep and Windows stops at
+# 260 characters.
+root = '{root}'
+
+[steam]
+# Must own DayZ. Anonymous login does not work for it.
+username = "{username}"
+# dzsm downloads steamcmd here if it is missing, and generates a BattlEye RCON password
+# per instance. Neither needs anything from you.
+steamcmd_path = '{root}{separator}steamcmd{separator}steamcmd.exe'
+
+# ---------------------------------------------------------------------------
+# Mods. Add one entry per Workshop mod, then run `dzsm mods update`.
+# The key is the name instances refer to; workshop_id is from the Workshop URL.
+# ---------------------------------------------------------------------------
+
+# [mods.CF]
+# kind = "workshop"
+# workshop_id = 1559212036
+
+# ---------------------------------------------------------------------------
+# Instances. One server each. Ports must differ; RCON defaults to port + 3.
+# ---------------------------------------------------------------------------
+
+[instances.server1]
+port = 2302
+# ORDER IS LOAD ORDER - framework mods such as CF go before what depends on them.
+mods = []
+# Restart this many hours after starting. Remove the line to disable.
+restart_after_hours = 4
+# Wall-clock restarts as well, if you want them: ["04:00", "16:00"]
+restart_schedule = []
+"""
+
+
+@app.command()
 def check(config_path: ConfigPath = Path("config.toml")) -> None:
     """Validate config and report the resolved layout. Touches nothing."""
     cfg = _load_config(config_path)
@@ -941,6 +1052,16 @@ def _fail(exc: Exception) -> NoReturn:
 
 
 def _load_config(path: Path) -> Config:
+    if not path.exists():
+        # Every command needs a config, so this is the first thing a new user hits.
+        # Saying only "no such file" leaves them with nowhere to go.
+        _fail(
+            ConfigError(
+                f"no config at {path}.\n"
+                f"Run `dzsm init` to create one, or point --config (or DZSM_CONFIG) at "
+                f"an existing file."
+            )
+        )
     try:
         return load_config(path)
     except ConfigError as exc:

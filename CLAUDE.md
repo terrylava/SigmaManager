@@ -232,6 +232,17 @@ Copying happens only with the instance stopped.
 Disk is explicitly the secondary concern here — managing many servers, mods, and versions
 comes first. Do not "optimize" isolation or the version cache away.
 
+**`dzsm init` is the entry point for a new user**, and the only command that works
+without a config. Every other command routes a missing config through `_load_config`,
+which points at it — without that a first-time user is dead-ended, since the binary
+distribution has no `config.example.toml` in it. The generated config must *validate as
+written* and contain a startable instance; a config that needs fixing before it loads is
+the same dead end one step later.
+
+Two things about generating TOML: single quotes are **literal** strings, so Windows paths
+go in unescaped (escaping puts two backslashes in the value), and the file is kept to
+plain ASCII because people open it in whatever editor Windows gives them.
+
 **There is a PyInstaller build** (`pyinstaller dzsm.spec`). Two things break silently in a
 frozen build and are already handled — do not undo them:
 
