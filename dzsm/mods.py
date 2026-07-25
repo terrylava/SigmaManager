@@ -53,6 +53,38 @@ def safe_rmtree(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def promote_tree(source: Path, destination: Path, *, strategy: str = "copy") -> Path:
+    """Copy a directory to an immutable destination, atomically from the reader's view.
+
+    Copies into a staging directory and renames into place, so an interrupted copy can
+    never leave a partially-populated version directory that later looks complete. Shared
+    by the mod cache and the server app, which have the same problem for the same reason:
+    a running server holds locks on whatever it is using, so nothing may ever be written
+    over in place.
+
+    "hardlink" is the untested optimization in spec §12 — it silently corrupts older
+    versions if steamcmd writes files in place rather than delete+recreating.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.parent / f".incoming-{destination.name}-{os.getpid()}"
+    safe_rmtree(staging)
+
+    copy_function = os.link if strategy == "hardlink" else shutil.copy2
+    try:
+        shutil.copytree(source, staging, copy_function=copy_function, symlinks=True)
+        staging.replace(destination)
+    except OSError as exc:
+        try:
+            safe_rmtree(staging)
+        except (OSError, ModCacheError) as cleanup_exc:
+            _log.error("mods: failed to clean up staging dir %s: %s", staging, cleanup_exc)
+        raise ModCacheError(
+            f"failed to promote {source} to {destination} ({strategy}): {exc}"
+        ) from exc
+
+    return destination
+
+
 def promote_snapshot(
     config: Config,
     state: State,
@@ -96,32 +128,7 @@ def promote_snapshot(
             f"directory {source} does not exist"
         )
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    # Copy into a staging directory and rename into place, so an interrupted copy can
-    # never leave a partially-populated version directory that later looks complete.
-    staging = destination.parent / f".incoming-{version}-{os.getpid()}"
-    safe_rmtree(staging)
-
-    copy_function = os.link if config.snapshot_strategy == "hardlink" else shutil.copy2
-    try:
-        shutil.copytree(source, staging, copy_function=copy_function, symlinks=True)
-        staging.replace(destination)
-    except OSError as exc:
-        try:
-            safe_rmtree(staging)
-        except (OSError, ModCacheError) as cleanup_exc:  # noqa: BLE001 — reported, not hidden
-            _log.error(
-                "mods: failed to clean up staging dir %s for mod %s: %s",
-                staging,
-                workshop_id,
-                cleanup_exc,
-            )
-        raise ModCacheError(
-            f"failed to promote mod {workshop_id} version {version} "
-            f"({config.snapshot_strategy}) from {source} to {destination}: {exc}"
-        ) from exc
-
+    promote_tree(source, destination, strategy=config.snapshot_strategy)
     size = _tree_size(destination)
     state.record_version(workshop_id, version, size)
     _log.info(

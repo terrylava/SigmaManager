@@ -28,7 +28,7 @@ verified against live Steam, the download path only against fakes.
 |---|---|
 | `config.py` | Done |
 | `state.py` | Done |
-| `steam.py` | Web API + download + verification done; `update_server_app` stubbed |
+| `steam.py` | Done |
 | `mods.py` | Done |
 | `instance.py` | Done |
 | `runner.py` | Done |

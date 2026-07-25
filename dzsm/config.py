@@ -141,7 +141,15 @@ class Config(BaseModel):
 
     @property
     def serverapp_dir(self) -> Path:
+        """Tier 2 for the server app — immutable serverapp/<buildid>/ directories."""
         return self.root / "serverapp"
+
+    @property
+    def serverapp_download_dir(self) -> Path:
+        """Tier 1 for the server app: steamcmd's mutable working copy, overwritten in
+        place on every update. Kept out of serverapp/ so it can never be mistaken for a
+        version directory."""
+        return self.root / ".serverapp-download"
 
     @property
     def modcache_dir(self) -> Path:

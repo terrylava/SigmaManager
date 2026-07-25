@@ -132,7 +132,18 @@ one a running instance is pinned to — the server holds OS-level locks on those
 `--force` included. Pruning goes through the same path, so automation gets no extra
 privileges.
 
-Still stubbed: `steam.update_server_app`, `api.py`.
+**The server app is managed too.** `dzsm server update` downloads appid 223350 via
+steamcmd into `serverapp/<buildid>/`, versioned exactly like mods and for the same
+reason — a running server locks its own binaries, so nothing may be overwritten in place.
+The version identity is Steam's `buildid` from `appmanifest_223350.acf`, the server app's
+equivalent of a mod's `time_updated`. Verification refuses a run that produced no
+manifest, no buildid, or no executable, regardless of exit code.
+
+`config.server_app_path`, when set, still wins over the managed build — an explicit
+config choice should not be silently overridden. `dzsm server update` says so when it
+applies.
+
+Still stubbed: `api.py` (deferred until the CLI settles, spec §11).
 
 **`server_app_path` is interim.** Because `update_server_app` is a stub, dzsm cannot
 download appid 223350, so instances run against a Steam-installed server pointed at by

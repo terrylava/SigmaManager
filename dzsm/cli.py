@@ -21,6 +21,7 @@ from dzsm.mods import (
     collect_garbage,
     delete_version,
     promote_snapshot,
+    promote_tree,
     prunable,
     remove_mod,
     unused_mods,
@@ -34,6 +35,7 @@ from dzsm.steam import (
     check_updates,
     download_mod,
     login_interactive,
+    update_server_app,
     verify_download,
 )
 from dzsm.steam import login as steam_login
@@ -54,7 +56,13 @@ instance_app = typer.Typer(
     help="Server instances.",
     no_args_is_help=True,
 )
+server_app = typer.Typer(
+    name="server",
+    help="The DayZ server application itself.",
+    no_args_is_help=True,
+)
 app.add_typer(mods_app)
+app.add_typer(server_app)
 app.add_typer(instance_app)
 
 ConfigPath = Annotated[
@@ -509,6 +517,72 @@ def mods_delete(
         _save_state(cfg, state)
 
     typer.secho(f"deleted {deleted}", fg=typer.colors.GREEN)
+
+
+@server_app.command("update")
+def server_update(
+    config_path: ConfigPath = Path("config.toml"),
+    validate: Annotated[
+        bool,
+        typer.Option("--validate", help="Re-check every file. Slow; use if suspect."),
+    ] = False,
+) -> None:
+    """Download or update the DayZ server app into a versioned directory.
+
+    Safe to run with servers up: like mods, this never touches a directory an instance is
+    using. A new build lands beside the old one and is picked up at the next restart.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+
+    try:
+        build_id = update_server_app(cfg, validate=validate)
+    except SteamError as exc:
+        _fail(exc)
+
+    destination = cfg.serverapp_dir / build_id
+    if destination.is_dir():
+        typer.echo(f"server app already promoted at build {build_id}")
+    else:
+        try:
+            promote_tree(
+                cfg.serverapp_download_dir, destination, strategy=cfg.snapshot_strategy
+            )
+        except ModCacheError as exc:
+            _fail(exc)
+        typer.secho(f"promoted server app build {build_id} -> {destination}", fg=typer.colors.GREEN)
+
+    state.serverapp_version = build_id
+    _save_state(cfg, state)
+
+    if cfg.server_app_path is not None:
+        typer.secho(
+            f"note: server_app_path is set ({cfg.server_app_path}), so instances still "
+            f"use that install. Unset it to run the managed build.",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@server_app.command("list")
+def server_list(config_path: ConfigPath = Path("config.toml")) -> None:
+    """Show downloaded server app builds and which one instances will use."""
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+
+    builds = (
+        sorted(p.name for p in cfg.serverapp_dir.iterdir() if p.is_dir())
+        if cfg.serverapp_dir.is_dir()
+        else []
+    )
+    if not builds:
+        typer.echo("no server app builds downloaded")
+    for build in builds:
+        marker = " <- active" if build == state.serverapp_version else ""
+        typer.echo(f"{build}{marker}")
+
+    if cfg.server_app_path is not None:
+        typer.echo("")
+        typer.echo(f"instances use server_app_path: {cfg.server_app_path}")
 
 
 @instance_app.command("start")

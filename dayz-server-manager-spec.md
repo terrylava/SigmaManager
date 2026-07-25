@@ -80,8 +80,10 @@ This is the core thing `om.py` got wrong — it conflated them.
 root/
   steamcmd/
     steamapps/workshop/content/221100/<id>/    # steamcmd's mutable working dir
+  .serverapp-download/                         # steamcmd's mutable server app copy
   serverapp/
-    <version>/                                 # versioned like mods
+    <buildid>/                                 # versioned like mods; buildid from
+                                               # appmanifest_223350.acf
   modcache/
     <workshop_id>/
       <time_updated>/                          # immutable snapshot

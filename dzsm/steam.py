@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-from dzsm.config import WORKSHOP_APPID, Config, SteamConfig
+from dzsm.config import SERVER_APPID, WORKSHOP_APPID, Config, SteamConfig
 
 _log = logging.getLogger(__name__)
 
@@ -380,13 +381,85 @@ def verify_download(config: Config, result: DownloadResult) -> None:
     _log.info("steam: mod %s download verified at %s", workshop_id, result.path)
 
 
-def update_server_app(config: Config) -> str:
+def update_server_app(config: Config, *, validate: bool = False) -> str:
     """Download/update the DayZ server app (223350) into a version directory.
 
     Versioned the same way mods are, for the same reason: a running server locks its own
-    binaries too.
+    binaries too, so an in-place update while any instance is up would fail or corrupt.
+    The version identity is Steam's `buildid` from the app manifest — the server app's
+    equivalent of a workshop mod's `time_updated`.
+
+    steamcmd downloads into a fixed working directory (tier 1, mutable) and the result is
+    promoted into serverapp/<buildid>/ (tier 2, immutable) only after verification.
+
+    `validate` makes steamcmd re-check every file — slow, but the fix when an install is
+    suspected corrupt.
+
+    Returns the buildid. Raises SteamError on any failure; never returns a version that
+    was not actually installed (Rule 1).
     """
-    raise NotImplementedError("spec §1, §3")
+    download_dir = config.serverapp_download_dir
+    download_dir.mkdir(parents=True, exist_ok=True)
+    manifest = download_dir / "steamapps" / f"appmanifest_{SERVER_APPID}.acf"
+    build_before = _read_buildid(manifest)
+
+    _log.info("steam: updating server app %s into %s", SERVER_APPID, download_dir)
+    args = [
+        # force_install_dir must precede app_update, and steamcmd is happier with it
+        # before login too.
+        "+force_install_dir",
+        str(download_dir),
+        *_login_args(config.steam),
+        "+app_update",
+        str(SERVER_APPID),
+    ]
+    if validate:
+        args.append("validate")
+    args.append("+quit")
+
+    run = _run_steamcmd(config.steam, args, timeout=float(config.download_timeout_seconds))
+    _raise_for_output(run.output, context=f"server app {SERVER_APPID} update")
+    if run.returncode not in (0, STEAMCMD_SELF_UPDATE_EXIT):
+        raise SteamError(
+            f"server app update failed: steamcmd exited {run.returncode}\n"
+            f"{_tail(run.output)}"
+        )
+
+    build_id = _read_buildid(manifest)
+    if build_id is None:
+        raise SteamError(
+            f"server app update failed: no buildid in {manifest} after the run. "
+            f"steamcmd reported success but produced no usable manifest.\n"
+            f"{_tail(run.output)}"
+        )
+
+    executable = download_dir / (
+        "DayZServer_x64.exe" if sys.platform == "win32" else "DayZServer"
+    )
+    if not executable.is_file():
+        raise SteamError(
+            f"server app update failed: {executable} is missing after the run\n"
+            f"{_tail(run.output)}"
+        )
+
+    if build_before is not None and build_before == build_id:
+        _log.info("steam: server app already at build %s", build_id)
+
+    return build_id
+
+
+def _read_buildid(manifest: Path) -> str | None:
+    """Pull buildid out of steamcmd's app manifest (a VDF file).
+
+    Returns None when the manifest is absent or unparseable — callers treat that as a
+    failed install rather than guessing a version.
+    """
+    try:
+        text = manifest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r'"buildid"\s+"(\d+)"', text)
+    return match.group(1) if match else None
 
 
 # --- internals ---------------------------------------------------------------
