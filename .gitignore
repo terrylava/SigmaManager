@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Runtime data — never commit. config.toml holds a Steam username; state.json is
+# machine-local truth about which instance is pinned to which mod version.
+config.toml
+state.json
+
+# Managed trees, if anyone ever points a root at the repo dir
+steamcmd/
+serverapp/
+modcache/
+localmods/
+instances/
+
+# Editor
+.vscode/
+.idea/

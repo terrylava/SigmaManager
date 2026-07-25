@@ -1,0 +1,4 @@
+# Normalize to LF in the repository. Working copies on Windows still get CRLF where the
+# platform wants it, but the committed bytes stay consistent — the CI matrix runs ubuntu
+# as well as windows, and mixed line endings there produce diff noise on every checkout.
+* text=auto eol=lf

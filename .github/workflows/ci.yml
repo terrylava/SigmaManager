@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    # Windows is the primary target; ubuntu is here because spec §5 item 3 (native
+    # Linux server viability) is unresolved and the code should stay portable.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      # Rule 1 (spec §7) is enforced here. A failing mypy run is a blocking failure,
+      # not a warning.
+      - run: mypy
+      - run: pytest

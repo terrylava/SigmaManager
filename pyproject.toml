@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dzsm"
+version = "0.1.0"
+description = "DayZ server manager: versioned mod cache, steamcmd integration, instance supervision"
+readme = "README.md"
+# 3.11+ so tomllib is stdlib (config is TOML) and st_reparse_tag is available.
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+]
+dev = [
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "pytest>=8.2",
+    "types-psutil",
+]
+
+[project.scripts]
+dzsm = "dzsm.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dzsm"]
+
+# Rule 1 (spec §7) is enforced here. Do not relax these.
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# warn_unreachable is deliberately OFF. mypy narrows sys.platform to whichever OS it
+# runs on, so every platform-guarded branch (the winreg block in config.py, the
+# junction helper in tests) reads as dead code on one leg of the CI matrix and live on
+# the other. Suppressing it per-site just trades that for unused-ignore errors.
+disallow_any_explicit = false
+files = ["dzsm", "tests"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",  # pycodestyle + pyflakes
+    "I",            # import sorting
+    "UP",           # pyupgrade
+    "B",            # bugbear
+    "ANN",          # require annotations (supports Rule 1)
+    "RET",          # return consistency (supports Rule 1)
+    "PTH",          # prefer pathlib
+    "S",            # bandit; S603/S607 matter for the subprocess rules in spec §4
+]
+ignore = [
+    "ANN401",  # Any is occasionally needed at boundaries
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

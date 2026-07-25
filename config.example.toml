@@ -1,0 +1,54 @@
+# Copy to config.toml and edit. config.toml is gitignored.
+#
+# Keep `root` SHORT. Mod trees are deep and version directories add segments; a long
+# root will blow past Windows MAX_PATH (260) at runtime. `D:\dz`, not
+# `C:\Users\you\Documents\DayZ Server Manager`. Config load validates this and fails.
+root = 'D:\dz'
+
+# Version directories are retained this long after their refcount hits 0. The window is
+# also the rollback window (spec §8).
+gc_retention_days = 7
+
+# "copy" is the only trusted strategy. "hardlink" is an untested optimization (spec §12)
+# that silently corrupts old versions if steamcmd writes files in place.
+snapshot_strategy = "copy"
+
+[steam]
+username = "your_steam_account"
+# The password is read from this environment variable, never from this file.
+# Seed Steam Guard once interactively; steamcmd caches a sentry afterward.
+password_env = "DZSM_STEAM_PASSWORD"
+steamcmd_path = 'D:\dz\steamcmd\steamcmd.exe'
+
+# ---------------------------------------------------------------------------
+# Mods. The table key is the name instances refer to.
+# ---------------------------------------------------------------------------
+
+[mods.CF]
+kind = "workshop"
+workshop_id = 1559212036
+
+[mods.Expansion]
+kind = "workshop"
+workshop_id = 2116157322
+
+[mods.MyTestMod]
+kind = "local"
+path = 'D:\dz\localmods\@MyTestMod'
+
+# ---------------------------------------------------------------------------
+# Instances.
+# ---------------------------------------------------------------------------
+
+[instances.chernarus]
+port = 2302
+# ORDER IS LOAD ORDER. It is the semicolon order in -mod=. Framework mods
+# (CF and friends) must come before anything that depends on them. This list is the
+# only source of load order — never sorted, never derived from the [mods] table order.
+mods = ["CF", "Expansion"]
+restart_schedule = ["04:00", "10:00", "16:00", "22:00"]
+
+[instances.testing]
+port = 2402
+mods = ["CF", "MyTestMod"]
+restart_schedule = ["05:00", "17:00"]
