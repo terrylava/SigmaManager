@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+# PyInstaller output; dzsm.spec is committed, the binaries are not.
 dist/
 build/
 .mypy_cache/

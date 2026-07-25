@@ -232,6 +232,15 @@ Copying happens only with the instance stopped.
 Disk is explicitly the secondary concern here — managing many servers, mods, and versions
 comes first. Do not "optimize" isolation or the version cache away.
 
+**There is a PyInstaller build** (`pyinstaller dzsm.spec`). Two things break silently in a
+frozen build and are already handled — do not undo them:
+
+- `dashboard.html` is a data file, so `api._dashboard_path()` looks under `sys._MEIPASS`
+  when frozen. Any other file read relative to `__file__` needs the same treatment.
+- uvicorn resolves its loop, protocol, and lifespan implementations by string at runtime,
+  so `collect_submodules("uvicorn")` is in the spec's hiddenimports. Without it the binary
+  builds fine and dies the moment `serve` starts.
+
 **`dzsm daemon` is the long-running form**: supervision in a background thread, uvicorn on
 the main one, so a Ctrl-C or service stop shuts both down. Three properties it must keep:
 

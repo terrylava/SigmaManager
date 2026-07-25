@@ -35,6 +35,26 @@ verified against live Steam, the download path only against fakes.
 | `cli.py` | Done |
 | `api.py` | Done |
 
+## Standalone binary
+
+```bash
+pip install -e ".[dev,web,build]" && pyinstaller dzsm.spec --noconfirm --clean
+```
+
+Produces `dist/dzsm.exe` (~18 MB), which runs on a machine with **no Python installed** —
+the point being that a game server box should not need a development environment. Copy the
+one file across and it works.
+
+Two things to know about the default onefile build:
+
+- It unpacks to a temp directory on every start, costing a second or two, and leaves a
+  `_MEI*` directory behind if the process is *killed* rather than stopped cleanly.
+- Frozen binaries are false-positived by antivirus reasonably often.
+
+If either matters — and for a long-lived service the first one might — set
+`ONEFILE = False` in `dzsm.spec` for a folder build that starts instantly and leaves
+nothing behind.
+
 ## Running it always
 
 ```bash

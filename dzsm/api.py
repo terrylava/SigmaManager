@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import sys
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -380,7 +381,19 @@ def create_app(config_path: Path) -> FastAPI:
 
 
 def _dashboard_html() -> str:
-    return (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+    return _dashboard_path().read_text(encoding="utf-8")
+
+
+def _dashboard_path() -> Path:
+    """Where dashboard.html lives, in a source tree or inside a PyInstaller bundle.
+
+    A frozen build unpacks data files under sys._MEIPASS, so __file__ points into the
+    bundle's module archive rather than at a real directory.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle is not None:
+        return Path(bundle) / "dzsm" / "dashboard.html"
+    return Path(__file__).parent / "dashboard.html"
 
 
 def _known_instance(config: Config, name: str) -> None:

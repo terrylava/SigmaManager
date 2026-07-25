@@ -28,6 +28,9 @@ dev = [
     "pytest>=8.2",
     "types-psutil",
 ]
+build = [
+    "pyinstaller>=6.0",
+]
 
 [project.scripts]
 dzsm = "dzsm.cli:app"
