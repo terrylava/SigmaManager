@@ -65,7 +65,7 @@ def test_it_tells_them_what_to_do_next(tmp_path: Path) -> None:
 
     assert "dzsm login --interactive" in output
     assert "dzsm server update" in output
-    assert "dzsm instance start server1" in output
+    assert "dzsm gui" in output
 
 
 def test_it_refuses_to_clobber_an_existing_config(tmp_path: Path) -> None:

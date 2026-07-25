@@ -159,12 +159,16 @@ It asks where things should live and which Steam account owns DayZ, writes a
 ```
   1. dzsm login --interactive     seed Steam Guard once
   2. dzsm server update           download the DayZ server (~4 GB)
-  3. dzsm instance start server1  start the vanilla server it made for you
+  3. dzsm gui                     dashboard, in your browser
 ```
 
-That gets a vanilla server running. Then add mods and instances to `config.toml`,
-`dzsm mods update` to download them, and `dzsm daemon` to keep everything up with a web
-dashboard.
+`dzsm gui` supervises everything, serves the dashboard, and opens it — creating a config
+first if there isn't one, so it also works as the very first command you run.
+
+From the dashboard you can start, stop, and restart instances, update mods, and update
+the server app. Two things stay in the terminal on purpose: **Steam Guard**, which needs a
+code typed into steamcmd itself, and **adding or removing mods and instances**, which is
+editing `config.toml`.
 
 ## From source
 

@@ -5,90 +5,231 @@
 <title>dzsm</title>
 <style>
  body { font: 14px system-ui, sans-serif; margin: 2rem; background: #111; color: #ddd }
- h1 { font-size: 1.2rem; margin: 0 0 1.5rem }
+ h1 { font-size: 1.2rem; margin: 0 0 1.5rem; display: flex; gap: 1rem; align-items: baseline }
  h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .05em;
       color: #888; margin: 2rem 0 .5rem }
  table { border-collapse: collapse; width: 100% }
- td, th { text-align: left; padding: .35rem .8rem .35rem 0; border-bottom: 1px solid #262626 }
+ td, th { text-align: left; padding: .45rem .8rem .45rem 0; border-bottom: 1px solid #262626 }
  th { color: #888; font-weight: 500 }
  .run { color: #4ade80 } .stop { color: #777 } .warn { color: #fbbf24 }
+ .held { color: #22d3ee } .err { color: #f87171 }
  code { color: #93c5fd }
  .note { color: #666; margin-top: 2rem; font-size: .85rem }
+ button { font: inherit; background: #1e1e1e; color: #ddd; border: 1px solid #3a3a3a;
+          border-radius: 4px; padding: .25rem .7rem; cursor: pointer; margin-right: .3rem }
+ button:hover:not(:disabled) { background: #2a2a2a; border-color: #555 }
+ button:disabled { opacity: .4; cursor: default }
+ button.primary { border-color: #2f6f4f; color: #4ade80 }
+ button.danger { border-color: #6f2f2f; color: #f87171 }
+ #msg { margin: 1rem 0; padding: .6rem .8rem; border-radius: 4px; display: none }
+ #msg.show { display: block }
+ #msg.ok { background: #16281c; color: #4ade80 }
+ #msg.bad { background: #2a1616; color: #f87171 }
+ #jobs { margin: 1rem 0 }
+ .job { padding: .4rem 0; color: #aaa }
+ .spin { display: inline-block; animation: spin 1s linear infinite }
+ @keyframes spin { to { transform: rotate(360deg) } }
+ #token { font: inherit; background: #1a1a1a; color: #ddd; border: 1px solid #333;
+          border-radius: 4px; padding: .2rem .5rem; width: 14rem }
+ .bar { display: flex; gap: .5rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap }
 </style>
 </head>
 <body>
-<h1>dzsm</h1>
+<h1>dzsm <span class="note" id="root"></span></h1>
+
+<div id="msg"></div>
+<div id="jobs"></div>
 <div id="c">loading&hellip;</div>
+
 <p class="note">
-  Read-only view, refreshing every 10s. Writes go through the API with a token, or the CLI.
+  Refreshes every few seconds. Adding or removing mods and instances is done in
+  <code>config.toml</code>; Steam Guard is seeded once with
+  <code>dzsm login --interactive</code>.
 </p>
+
 <script>
-const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc = s => String(s).replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mib = b => (b / 1048576).toFixed(1) + ' MiB';
 const age = d => d == null ? '?' : d.toFixed(1) + 'd';
 
+let busy = false;
+let jobs = [];
+
+function token() {
+  return sessionStorage.getItem('dzsm-token') || '';
+}
+
+function headers() {
+  const t = token();
+  return t ? {'X-DZSM-Token': t} : {};
+}
+
+function say(text, bad) {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  el.className = 'show ' + (bad ? 'bad' : 'ok');
+  if (!bad) setTimeout(() => { el.className = ''; }, 4000);
+}
+
+async function post(path, label) {
+  if (busy) return;
+  busy = true;
+  render();
+  try {
+    const r = await fetch(path, {method: 'POST', headers: headers()});
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      // FastAPI puts the reason in `detail`; the CLI's refusals come through verbatim.
+      say(body.detail || (label + ' failed (' + r.status + ')'), true);
+    } else if (body.id) {
+      say(label + ' started');           // 202 with a job id
+    } else {
+      say(label + ' done');
+    }
+  } catch (e) {
+    say(label + ' failed: ' + e, true);
+  } finally {
+    busy = false;
+    load();
+  }
+}
+
+const act = {
+  start: n => post('api/instances/' + encodeURIComponent(n) + '/start', 'Start ' + n),
+  stop: n => post('api/instances/' + encodeURIComponent(n) + '/stop', 'Stop ' + n),
+  restart: n => post('api/instances/' + encodeURIComponent(n) + '/restart', 'Restart ' + n),
+  modsCheck: () => post('api/mods/check', 'Check for mod updates'),
+  modsUpdate: () => post('api/mods/update', 'Mod update'),
+  serverUpdate: () => post('api/server/update', 'Server app update'),
+};
+
 function instanceRow(i) {
-  const pins = Object.entries(i.pins).map(([k, v]) => k + '=' + v).join(', ') || '—';
-  const state = i.running ? 'running' : 'stopped';
+  const pins = Object.entries(i.pins).map(([k, v]) => k + '=' + v).join(', ') || '&mdash;';
+  const state = i.running
+    ? '<span class="run">running</span>'
+    : (i.held ? '<span class="held">held down</span>' : '<span class="stop">stopped</span>');
+  const n = esc(i.name);
+  const d = busy ? ' disabled' : '';
+  const buttons = i.running
+    ? '<button class="danger" onclick="act.stop(\'' + n + '\')"' + d + '>Stop</button>'
+      + '<button onclick="act.restart(\'' + n + '\')"' + d + '>Restart</button>'
+    : '<button class="primary" onclick="act.start(\'' + n + '\')"' + d + '>Start</button>';
   return '<tr>'
-    + '<td>' + esc(i.name)
-    + '<td class="' + (i.running ? 'run' : 'stop') + '">' + state
-    + '<td>' + i.port
+    + '<td>' + n
+    + '<td>' + state
+    + '<td>' + i.port + (i.rcon_port ? ' <span class="note">rcon ' + i.rcon_port + '</span>' : '')
     + '<td><code>' + esc(pins) + '</code>'
-    + '<td>' + esc(i.next_restart || 'no schedule')
+    + '<td>' + esc(i.next_restart ? i.next_restart.replace('T', ' ').slice(0, 16) : 'no schedule')
+    + '<td>' + buttons
     + '</tr>';
 }
 
 function versionRow(v) {
-  const use = v.in_use
+  const use = v.pinned_by.length
     ? '<span class="run">in use by ' + esc(v.pinned_by.join(', ')) + '</span>'
-    : '<span class="warn">unused</span>';
-  const missing = v.exists ? '' : ' <span class="warn">MISSING</span>';
+    : (v.kept_by.length
+        ? '<span class="held">kept by ' + esc(v.kept_by.join(', ')) + '</span>'
+        : '<span class="warn">unused</span>');
   return '<tr>'
     + '<td>' + esc(v.mod_name || v.workshop_id)
     + '<td><code>' + v.version + '</code>'
     + '<td>' + mib(v.size_bytes)
     + '<td>' + age(v.age_days)
-    + '<td>' + use + missing
+    + '<td>' + use + (v.exists ? '' : ' <span class="err">MISSING</span>')
     + '</tr>';
 }
 
+function renderJobs() {
+  const running = jobs.filter(j => j.status === 'running');
+  const recent = jobs.filter(j => j.status !== 'running').slice(0, 3);
+  let h = '';
+  for (const j of running) {
+    h += '<div class="job"><span class="spin">&#9696;</span> ' + esc(j.kind) + ' running&hellip;</div>';
+  }
+  for (const j of recent) {
+    const cls = j.status === 'succeeded' ? 'run' : 'err';
+    const detail = j.detail ? ' &mdash; ' + esc(j.detail.split('\n')[0]) : '';
+    h += '<div class="job"><span class="' + cls + '">' + esc(j.kind) + ' ' + j.status
+       + '</span>' + detail + '</div>';
+  }
+  document.getElementById('jobs').innerHTML = h;
+}
+
+let last = {instances: [], versions: [], server: {builds: [], active: null}};
+
+function render() {
+  const d = busy ? ' disabled' : '';
+  let h = '<div class="bar">'
+    + '<button onclick="act.modsCheck()"' + d + '>Check for mod updates</button>'
+    + '<button onclick="act.modsUpdate()"' + d + '>Update mods</button>'
+    + '<button onclick="act.serverUpdate()"' + d + '>Update server app</button>'
+    + '<input id="token" type="password" placeholder="API token (only if set)">'
+    + '</div>';
+
+  h += '<h2>Instances</h2><table>'
+    + '<tr><th>Name<th>State<th>Ports<th>Pinned<th>Next restart<th></tr>';
+  h += last.instances.map(instanceRow).join('');
+  if (!last.instances.length) h += '<tr><td colspan="6">none configured</tr>';
+
+  h += '</table><h2>Cached mod versions</h2><table>'
+    + '<tr><th>Mod<th>Version<th>Size<th>Age<th>Status</tr>';
+  h += last.versions.map(versionRow).join('');
+  if (!last.versions.length) h += '<tr><td colspan="5">nothing cached</tr>';
+
+  h += '</table><h2>Server app</h2><table><tr><th>Build<th></tr>';
+  h += last.server.builds.map(b =>
+    '<tr><td><code>' + esc(b) + '</code><td>' + (b === last.server.active ? 'newest' : '') + '</tr>'
+  ).join('');
+  if (!last.server.builds.length) h += '<tr><td colspan="2">none downloaded</tr>';
+  h += '</table>';
+  if (last.server.server_app_path) {
+    h += '<p class="note">Instances use <code>' + esc(last.server.server_app_path) + '</code></p>';
+  }
+
+  document.getElementById('c').innerHTML = h;
+  const box = document.getElementById('token');
+  box.value = token();
+  box.addEventListener('change', e => sessionStorage.setItem('dzsm-token', e.target.value));
+  renderJobs();
+}
+
+let painted = '';
+
 async function load() {
   try {
-    const [inst, vers, srv] = await Promise.all([
+    const [inst, vers, srv, health, jl] = await Promise.all([
       fetch('api/instances').then(r => r.json()),
       fetch('api/versions').then(r => r.json()),
       fetch('api/server').then(r => r.json()),
+      fetch('api/health').then(r => r.json()),
+      fetch('api/jobs').then(r => r.json()),
     ]);
+    last = {instances: inst, versions: vers, server: srv};
+    jobs = jl;
+    document.getElementById('root').textContent = health.root;
 
-    let h = '<h2>Instances</h2><table>'
-      + '<tr><th>Name<th>State<th>Port<th>Pinned<th>Next restart</tr>';
-    h += inst.map(instanceRow).join('');
-    if (!inst.length) h += '<tr><td colspan="5">none configured</tr>';
-
-    h += '</table><h2>Cached versions</h2><table>'
-      + '<tr><th>Mod<th>Version<th>Size<th>Age<th>Status</tr>';
-    h += vers.map(versionRow).join('');
-    if (!vers.length) h += '<tr><td colspan="5">nothing cached</tr>';
-
-    h += '</table><h2>Server app</h2><table><tr><th>Build<th></tr>';
-    h += srv.builds.map(b =>
-      '<tr><td><code>' + esc(b) + '</code><td>' + (b === srv.active ? 'active' : '') + '</tr>'
-    ).join('');
-    if (!srv.builds.length) h += '<tr><td colspan="2">none downloaded</tr>';
-    h += '</table>';
-
-    if (srv.server_app_path) {
-      h += '<p class="note">Instances use <code>' + esc(srv.server_app_path) + '</code></p>';
-    }
-    document.getElementById('c').innerHTML = h;
+    // Only repaint when something actually changed. Rebuilding the DOM on a timer
+    // wipes whatever is being typed in the token box and can swallow a click that
+    // lands mid-refresh.
+    //
+    // age_days is recomputed server-side on every request, so it is rounded to the
+    // precision actually displayed — otherwise nothing ever compares equal and the
+    // page repaints forever.
+    const snapshot = JSON.stringify([last, jobs, busy], (k, v) =>
+      k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v);
+    if (snapshot === painted) return;
+    if (document.activeElement && document.activeElement.id === 'token') return;
+    painted = snapshot;
+    render();
   } catch (e) {
-    document.getElementById('c').textContent = 'failed to load: ' + e;
+    document.getElementById('c').innerHTML =
+      '<span class="err">failed to load: ' + esc(e) + '</span>';
   }
 }
 
 load();
-setInterval(load, 10000);
+setInterval(() => load(), 4000);
 </script>
 </body>
 </html>

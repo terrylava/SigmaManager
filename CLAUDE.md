@@ -269,6 +269,21 @@ the main one, so a Ctrl-C or service stop shuts both down. Three properties it m
   another thread of the same process; without the reload, the supervisor's older copy
   would overwrite those changes at its next save.
 
+**`dzsm gui` is the browser entry point**: creates a config if missing, supervises, serves,
+and opens the dashboard. The dashboard has controls (start/stop/restart, mods check/update,
+server update) which post to the same API routes the CLI uses. Steam Guard and editing
+`config.toml` deliberately stay in the terminal, and the page says so rather than leaving
+someone hunting for a button.
+
+`tests/test_dashboard.py` checks every path the page fetches against the routes the app
+serves — a typo there renders a button that 404s on click and explains nothing.
+
+**The dashboard only repaints when data changed.** Rebuilding the DOM on a timer wipes
+what is being typed in the token box and swallows clicks that land mid-refresh. `age_days`
+is recomputed server-side per request, so it is rounded in the comparison — otherwise
+nothing ever compares equal and it repaints forever, which is exactly the bug that was
+there first.
+
 **The web API is live** (`dzsm serve` alone, or inside `dzsm daemon`). It is deliberately thin — every route calls the
 same functions the CLI does, so the two can never disagree about what "running" or
 "pinned" means. Do not let it grow its own model of an instance or a version.

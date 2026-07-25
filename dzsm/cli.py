@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import threading
+import webbrowser
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, Optional
 
@@ -116,6 +117,23 @@ def init(
             )
         )
 
+    cfg = _create_config(config_path, root, username)
+    typer.echo("")
+    typer.echo(f"Everything will live under {cfg.root}")
+    typer.echo("")
+    typer.secho("Next:", bold=True)
+    typer.echo("  1. dzsm login --interactive     seed Steam Guard once")
+    typer.echo("  2. dzsm server update           download the DayZ server (~4 GB)")
+    typer.echo("  3. dzsm gui                     dashboard, in your browser")
+    typer.echo("")
+    typer.echo(f"Add mods and more instances in {config_path}; everything else can be")
+    typer.echo("driven from the dashboard.")
+
+
+def _create_config(
+    config_path: Path, root: str | None, username: str | None
+) -> Config:
+    """Prompt for what cannot be guessed, write a config, and prove it loads."""
     if root is None:
         typer.echo("Where should mods, server builds, and instances live?")
         typer.echo("Keep it short — deep mod paths hit the Windows 260-character limit.")
@@ -133,23 +151,11 @@ def init(
     # Validate what we just wrote rather than assuming — a root that fails the path
     # length check should be caught here, not three commands later.
     try:
-        cfg = load_config(config_path)
+        return load_config(config_path)
     except ConfigError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         typer.secho("Edit the file and re-run `dzsm check`.", fg=typer.colors.YELLOW)
         raise typer.Exit(1) from exc
-
-    typer.echo("")
-    typer.echo(f"Everything will live under {cfg.root}")
-    typer.echo("")
-    typer.secho("Next:", bold=True)
-    typer.echo("  1. dzsm login --interactive     seed Steam Guard once")
-    typer.echo("  2. dzsm server update           download the DayZ server (~4 GB)")
-    typer.echo("  3. dzsm instance start server1  start the vanilla server it made for you")
-    typer.echo("")
-    typer.echo(f"Then add mods and more instances in {config_path}, and:")
-    typer.echo("  dzsm mods update                download them")
-    typer.echo("  dzsm daemon                     keep everything up, with a web dashboard")
 
 
 def _starter_config(root: str, username: str) -> str:
@@ -291,6 +297,34 @@ def serve(
 
 
 @app.command()
+def gui(
+    config_path: ConfigPath = Path("config.toml"),
+    port: Annotated[
+        Optional[int],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Option("--port", help="Override api.port."),
+    ] = None,
+) -> None:
+    """Open the dashboard, creating a config first if there isn't one.
+
+    The one command for driving dzsm from a browser: it supervises every instance, serves
+    the dashboard, and opens it. Loopback only — for anything reachable from elsewhere,
+    use `dzsm daemon` with a token.
+    """
+    if not config_path.exists():
+        typer.secho("No config yet, so let's make one.", bold=True)
+        _create_config(config_path, None, None)
+        typer.echo("")
+        typer.secho(
+            "Seed Steam Guard once before downloading anything: "
+            "dzsm login --interactive",
+            fg=typer.colors.YELLOW,
+        )
+        typer.echo("")
+
+    daemon(config_path=config_path, host="127.0.0.1", port=port, only=None, open_browser=True)
+
+
+@app.command()
 def daemon(
     config_path: ConfigPath = Path("config.toml"),
     host: Annotated[
@@ -305,6 +339,9 @@ def daemon(
         Optional[list[str]],  # noqa: UP045
         typer.Option("--only", help="Supervise just these instances. Repeatable."),
     ] = None,
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="Open the dashboard once it is listening.")
+    ] = False,
 ) -> None:
     """Supervise instances and serve the API, in one long-running process.
 
@@ -347,7 +384,10 @@ def daemon(
     supervisor.start()
 
     typer.echo(f"supervising {', '.join(names)}")
-    typer.echo(f"http://{bind_host}:{bind_port}")
+    url = f"http://{bind_host}:{bind_port}"
+    typer.echo(url)
+    if open_browser:
+        _open_when_listening(url)
     try:
         uvicorn.run(
             create_app(config_path), host=bind_host, port=bind_port, log_level="info"
@@ -361,6 +401,22 @@ def daemon(
             typer.secho(
                 "supervisor did not stop within the timeout", fg=typer.colors.YELLOW, err=True
             )
+
+
+def _open_when_listening(url: str, *, delay: float = 1.0) -> None:
+    """Open a browser shortly after the server starts.
+
+    uvicorn.run blocks, so this is scheduled rather than called after it: a browser opened
+    before the port is listening just shows a connection error.
+    """
+
+    def opener() -> None:
+        try:
+            webbrowser.open(url)
+        except OSError as exc:  # pragma: no cover - headless or no handler
+            typer.secho(f"could not open a browser: {exc}", fg=typer.colors.YELLOW, err=True)
+
+    threading.Timer(delay, opener).start()
 
 
 def _web_dependencies(cfg: Config) -> tuple[Any, Any]:
