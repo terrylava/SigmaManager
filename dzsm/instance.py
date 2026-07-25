@@ -22,15 +22,15 @@ class InstanceError(Exception):
     """Instance is not launchable."""
 
 
-def build_mod_argument(mod_paths: list[Path]) -> str:
-    """Build the -mod= value from absolute paths, in load order.
+def build_mod_argument(mod_paths: list[Path], *, option: str = "mod") -> str:
+    """Build a -mod= or -serverMod= value from absolute paths, in load order.
 
     The list order IS the load order — framework mods before their dependents. Callers
     must pass the order from InstanceConfig.mods, never a sorted or dict-derived one.
 
     The trailing semicolon matches Bohemia's own examples. It is harmless; keep it.
     """
-    return f"-mod={';'.join(str(p) for p in mod_paths)};"
+    return f"-{option}={';'.join(str(p) for p in mod_paths)};"
 
 
 def build_launch_args(
@@ -39,6 +39,7 @@ def build_launch_args(
     instance: InstanceConfig,
     server_exe: Path,
     mod_paths: list[Path],
+    server_mod_paths: list[Path] | None = None,
 ) -> list[str]:
     """Build the full argv for one instance.
 
@@ -51,11 +52,19 @@ def build_launch_args(
     per-instance copying is needed.
     """
     instance_root = config.instance_dir(instance_name)
-    return [
+    args = [
         str(server_exe),
         f"-config={instance.config_file}",
         f"-port={instance.port}",
         build_mod_argument(mod_paths),
+    ]
+
+    # Omitted entirely when there are none. An empty -serverMod= is harmless but says
+    # nothing, and its absence makes the launch line easier to read in the RPT.
+    if server_mod_paths:
+        args.append(build_mod_argument(server_mod_paths, option="serverMod"))
+
+    args += [
         f"-profiles={instance_root / 'profiles'}",
         "-dologs",
         "-adminlog",
@@ -63,6 +72,7 @@ def build_launch_args(
         "-freezecheck",
         *instance.extra_args,
     ]
+    return args
 
 
 def server_directory(config: Config, state: State) -> Path:

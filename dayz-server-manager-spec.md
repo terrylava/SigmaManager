@@ -150,6 +150,12 @@ files at the absolute path — but the swap machinery disappears entirely.
 - **Load order is the semicolon order.** It must come from explicit config, never
   from dict iteration order or alphabetical sort. Framework mods (e.g. CF) load
   before their dependents.
+- **Server-only mods go in `-serverMod=`**, built the same way from the instance's
+  `server_mods` list. Clients never load these — admin tools and server-side logic. A mod
+  belongs to one list or the other, never both; config load rejects the overlap. The
+  argument is omitted entirely when the list is empty. Their `.bikey` files are still
+  synced: not strictly required, since clients do not load them, but omitting one would
+  kick any player who happens to have that mod enabled.
 - **`MAX_PATH` (260 chars) is a real risk.** Mod trees are deep and version dirs add
   segments. Keep the root **short** — `D:\dz\`, not
   `C:\Users\Lava\Documents\DayZ Server Manager\`. Alternatively enable Win32 long

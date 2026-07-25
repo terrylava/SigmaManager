@@ -38,7 +38,9 @@ path in `-mod=`.
   argv list with `subprocess.Popen`. Python passes arguments verbatim, so backslashes,
   spaces, and drive letters are safe.
 - **Do not sort or derive mod load order.** It is the order in `InstanceConfig.mods`,
-  which is the semicolon order in `-mod=`. Framework mods load before dependents.
+  which is the semicolon order in `-mod=`. Framework mods load before dependents. The
+  same applies to `server_mods` → `-serverMod=`; a mod belongs to one list or the other,
+  and config load rejects an overlap.
 - **steamcmd exit 7 is not a failure.** It means steamcmd replaced its own binary and
   restarted, which every fresh install does on its first run — the session itself
   usually completed. `STEAMCMD_SELF_UPDATE_EXIT` handles it. `login_interactive` can't

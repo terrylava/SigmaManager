@@ -21,7 +21,7 @@ import psutil
 
 from dzsm.config import Config, InstanceConfig
 from dzsm.instance import build_launch_args, ensure_layout, server_executable, sync_keys
-from dzsm.mods import ModCacheError, mod_paths, resolve_mod_versions
+from dzsm.mods import ModCacheError, mod_paths, resolve_mod_versions, server_mod_paths
 from dzsm.state import ProcessInfo, State, save_state
 
 _log = logging.getLogger(__name__)
@@ -53,13 +53,17 @@ def start(config: Config, state: State, instance_name: str) -> int:
     versions = _versions_to_activate(config, state, instance_name)
     try:
         paths = mod_paths(config, instance_name, versions)
+        server_paths = server_mod_paths(config, instance_name, versions)
     except ModCacheError as exc:
         raise RunnerError(
             f"instance {instance_name!r} cannot start: {exc}"
         ) from exc
 
-    sync_keys(config, state, instance_name, paths)
-    argv = build_launch_args(config, instance_name, instance, exe, paths)
+    # Keys for both lists. A server-only mod's key is not strictly needed — clients never
+    # load it — but omitting it would kick any player who happens to have that mod
+    # enabled, and keys are tiny. Matches how admins populate the directory by hand.
+    sync_keys(config, state, instance_name, [*paths, *server_paths])
+    argv = build_launch_args(config, instance_name, instance, exe, paths, server_paths)
     _log.info("instance %s: starting on port %s", instance_name, instance.port)
     _log.debug("instance %s: argv %s", instance_name, argv)
 

@@ -548,7 +548,9 @@ def resolve_mod_versions(config: Config, state: State, instance_name: str) -> di
     instance = config.instances[instance_name]
     versions: dict[str, int] = {}
 
-    for mod_name in instance.mods:
+    # Server-only mods are versioned and activated exactly like client-facing ones —
+    # they just end up in a different launch argument.
+    for mod_name in [*instance.mods, *instance.server_mods]:
         mod = config.mods[mod_name]
         if not isinstance(mod, WorkshopMod):
             continue
@@ -574,7 +576,7 @@ def resolve_mod_versions(config: Config, state: State, instance_name: str) -> di
 
 
 def mod_paths(config: Config, instance_name: str, versions: dict[str, int]) -> list[Path]:
-    """Absolute paths for an instance's mods, in the instance's declared load order.
+    """Absolute paths for an instance's client-facing mods, in declared load order.
 
     The order is exactly InstanceConfig.mods and must never be sorted — it is the
     semicolon order in -mod=, and framework mods have to precede their dependents
@@ -583,10 +585,31 @@ def mod_paths(config: Config, instance_name: str, versions: dict[str, int]) -> l
     Raises ModCacheError if any path is missing, rather than quietly starting a server
     with a mod absent.
     """
-    instance = config.instances[instance_name]
+    return _paths_for(config, instance_name, config.instances[instance_name].mods, versions)
+
+
+def server_mod_paths(
+    config: Config, instance_name: str, versions: dict[str, int]
+) -> list[Path]:
+    """Absolute paths for an instance's server-only mods, in declared load order.
+
+    These become -serverMod=. Clients never load them, so they are not subject to
+    client-side signature checks. Empty list when the instance declares none.
+    """
+    return _paths_for(
+        config, instance_name, config.instances[instance_name].server_mods, versions
+    )
+
+
+def _paths_for(
+    config: Config,
+    instance_name: str,
+    names: list[str],
+    versions: dict[str, int],
+) -> list[Path]:
     paths: list[Path] = []
 
-    for mod_name in instance.mods:
+    for mod_name in names:
         mod = config.mods[mod_name]
         if isinstance(mod, WorkshopMod):
             version = versions.get(mod_name)

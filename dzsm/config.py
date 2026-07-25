@@ -80,6 +80,9 @@ class InstanceConfig(BaseModel):
     # ORDER IS LOAD ORDER (spec §4). This list is the only source of truth for it.
     # Never sort it, never rebuild it from the mods table's iteration order.
     mods: list[str]
+    # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
+    # for things like admin tools and server-side logic. Same ordering rule applies.
+    server_mods: list[str] = Field(default_factory=list)
     # "HH:MM" local times.
     restart_schedule: list[str] = Field(default_factory=list)
     extra_args: list[str] = Field(default_factory=list)
@@ -214,16 +217,27 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _instances_reference_known_mods(self) -> Config:
         for instance_name, instance in self.instances.items():
-            for mod_name in instance.mods:
-                if mod_name not in self.mods:
+            for field, names in (("mods", instance.mods), ("server_mods", instance.server_mods)):
+                for mod_name in names:
+                    if mod_name not in self.mods:
+                        raise ValueError(
+                            f"instance {instance_name!r} {field} references unknown mod "
+                            f"{mod_name!r}; known mods: {sorted(self.mods)}"
+                        )
+                duplicates = {name for name in names if names.count(name) > 1}
+                if duplicates:
                     raise ValueError(
-                        f"instance {instance_name!r} references unknown mod {mod_name!r}; "
-                        f"known mods: {sorted(self.mods)}"
+                        f"instance {instance_name!r} {field} lists {sorted(duplicates)} "
+                        f"more than once"
                     )
-            duplicates = {m for m in instance.mods if instance.mods.count(m) > 1}
-            if duplicates:
+
+            # A mod is either client-facing or server-only, never both: -mod and
+            # -serverMod would each load it, and the engine has no reason to.
+            both = set(instance.mods) & set(instance.server_mods)
+            if both:
                 raise ValueError(
-                    f"instance {instance_name!r} lists {sorted(duplicates)} more than once"
+                    f"instance {instance_name!r} lists {sorted(both)} in both mods and "
+                    f"server_mods; a mod belongs to one or the other"
                 )
         return self
 

@@ -51,6 +51,10 @@ port = 2302
 # (CF and friends) must come before anything that depends on them. This list is the
 # only source of load order — never sorted, never derived from the [mods] table order.
 mods = ["CF", "Expansion"]
+# Server-only mods, emitted as -serverMod=. Clients never load these, so admin tools and
+# server-side logic belong here. Same ordering rule. A mod goes in one list or the
+# other — never both.
+server_mods = []
 restart_schedule = ["04:00", "10:00", "16:00", "22:00"]
 
 [instances.testing]
