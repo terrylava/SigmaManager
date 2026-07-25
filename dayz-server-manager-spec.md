@@ -407,6 +407,32 @@ The guard lives in `delete_version` as well as `remove_mod`, deliberately: a per
 delete would otherwise walk straight around a whole-mod protection and destroy the very
 cache the keep exists to preserve.
 
+### RCON and restart warnings
+
+DayZ's RCON is BattlEye's: UDP, CRC32-framed, sequence-numbered. `dzsm/rcon.py` implements
+it directly — the framing is worth care because a wrong CRC produces *no reply at all*
+rather than an error, so an encoding bug is indistinguishable from an unreachable server.
+
+An instance participates only when it sets `rcon_port`; dzsm never guesses one. The
+password comes from an environment variable and must match `RConPassword` in that
+server's BEServer config.
+
+When a scheduled restart is within `warning_lead_seconds` (default 300), the supervisor
+broadcasts `say -1 <message>` every `warning_interval_seconds` (default 4), counting down
+in human terms — "5 minutes", "1 minute", "20 seconds" — plus one final message at the
+restart itself that ignores the rate limit.
+
+The supervision loop's tick shortens to the warning interval inside that window;
+a 15-second poll obviously cannot deliver a message every 4 seconds.
+
+**Warnings are never allowed to affect the restart.** An unreachable port, a wrong
+password, or a mid-send failure is logged and the restart proceeds on schedule — the same
+reasoning as Rule 4. A server that restarts silently is a nuisance; a server that fails to
+restart because it could not announce itself is an outage.
+
+`dzsm instance say` and `dzsm instance rcon` expose the same connection for manual use,
+so RCON can be verified without waiting for a scheduled restart.
+
 ### Per-instance missions
 
 **On by default** (`per_instance_missions`). Mission folders hold `types.xml`,

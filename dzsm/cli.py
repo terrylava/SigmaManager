@@ -28,6 +28,7 @@ from dzsm.mods import (
     unused_mods,
     version_status,
 )
+from dzsm.rcon import RconError
 from dzsm.runner import RunnerError
 from dzsm.state import State, StateError, load_state, save_state
 from dzsm.steam import (
@@ -732,6 +733,59 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
         typer.echo(f"{name:<16} {marker:<18} port {instance.port}  next {when}")
         typer.echo(f"{'':<16} server {build}")
         typer.echo(f"{'':<16} {versions}")
+
+
+@instance_app.command("say")
+def instance_say(
+    name: str,
+    message: Annotated[str, typer.Argument(help="Text to broadcast to every player.")],
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """Send an admin chat message over RCON."""
+    cfg = _load_config(config_path)
+    if name not in cfg.instances:
+        _fail(ValueError(f"unknown instance {name!r}"))
+
+    try:
+        client = runner.rcon_client(cfg, name)
+    except RconError as exc:
+        _fail(exc)
+    if client is None:
+        _fail(ValueError(f"instance {name!r} has no rcon_port configured"))
+
+    try:
+        client.say(message)
+    except RconError as exc:
+        _fail(exc)
+    finally:
+        client.close()
+    typer.secho(f"{name}: sent", fg=typer.colors.GREEN)
+
+
+@instance_app.command("rcon")
+def instance_rcon(
+    name: str,
+    command: Annotated[str, typer.Argument(help="Raw BattlEye command, e.g. 'players'.")],
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """Run a raw RCON command and print the reply."""
+    cfg = _load_config(config_path)
+    if name not in cfg.instances:
+        _fail(ValueError(f"unknown instance {name!r}"))
+
+    try:
+        client = runner.rcon_client(cfg, name)
+    except RconError as exc:
+        _fail(exc)
+    if client is None:
+        _fail(ValueError(f"instance {name!r} has no rcon_port configured"))
+
+    try:
+        typer.echo(client.command(command))
+    except RconError as exc:
+        _fail(exc)
+    finally:
+        client.close()
 
 
 @instance_app.command("supervise")

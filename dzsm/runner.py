@@ -15,6 +15,7 @@ import contextlib
 import logging
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 
 import psutil
@@ -29,6 +30,7 @@ from dzsm.instance import (
     sync_keys,
 )
 from dzsm.mods import ModCacheError, mod_paths, resolve_mod_versions, server_mod_paths
+from dzsm.rcon import RconClient, RconError
 from dzsm.state import ProcessInfo, State, save_state
 
 _log = logging.getLogger(__name__)
@@ -171,6 +173,44 @@ def next_restart(instance: InstanceConfig, *, now: datetime | None = None) -> da
     return min(candidates) if candidates else None
 
 
+def rcon_client(config: Config, instance_name: str) -> RconClient | None:
+    """A connected RCON client for this instance, or None when it is not configured.
+
+    Returns None rather than raising for "not configured" — an instance without
+    `rcon_port` has simply opted out, which is not an error. A configured instance that
+    cannot connect *does* raise, because that is a broken setup worth hearing about.
+    """
+    instance = config.instances[instance_name]
+    if instance.rcon_port is None:
+        return None
+
+    password = config.rcon.password(instance.rcon_password_env)
+    if not password:
+        env = instance.rcon_password_env or config.rcon.password_env
+        raise RconError(
+            f"instance {instance_name!r} has rcon_port set but {env} is unset or empty"
+        )
+
+    client = RconClient(
+        config.rcon.host,
+        instance.rcon_port,
+        password,
+        timeout=config.rcon.timeout_seconds,
+    )
+    client.connect()
+    return client
+
+
+def humanize(seconds: float) -> str:
+    """A phrase players will read in chat: "5 minutes", "1 minute", "20 seconds"."""
+    total = max(0, int(round(seconds)))
+    if total >= 120:
+        return f"{total // 60} minutes"
+    if total >= 60:
+        return "1 minute"
+    return f"{total} seconds"
+
+
 def supervise(config: Config, state: State, instance_names: list[str]) -> None:
     """Run the supervision loop: restart on crash and on schedule.
 
@@ -188,6 +228,7 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
         raise RunnerError("no instances to supervise")
 
     due: dict[str, datetime | None] = {}
+    warned: dict[str, datetime] = {}
     for name in instance_names:
         if not is_running(config, state, name):
             _start_and_save(config, state, name, reason="initial start")
@@ -196,16 +237,23 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
     _log.info("supervising %s; Ctrl-C to stop", ", ".join(instance_names))
     try:
         while True:
-            time.sleep(config.supervise_poll_seconds)
+            time.sleep(_tick_seconds(config, due))
             now = datetime.now()
 
             for name in instance_names:
                 scheduled = due[name]
                 if scheduled is not None and now >= scheduled:
                     _log.info("instance %s: scheduled restart", name)
+                    _warn_players(config, name, warned, remaining=0.0, final=True)
                     _restart_and_save(config, state, name)
+                    warned.pop(name, None)
                     due[name] = next_restart(config.instances[name], now=now)
                     continue
+
+                if scheduled is not None:
+                    remaining = (scheduled - now).total_seconds()
+                    if remaining <= config.rcon.warning_lead_seconds:
+                        _warn_players(config, name, warned, remaining=remaining)
 
                 if not is_running(config, state, name):
                     # Crash restart. Activation runs again here, so a mod that finished
@@ -248,6 +296,62 @@ def _versions_to_activate(config: Config, state: State, instance_name: str) -> d
             fallback,
         )
         return fallback
+
+
+def _tick_seconds(config: Config, due: Mapping[str, datetime | None]) -> float:
+    """How long to sleep before the next pass.
+
+    Normally the poll interval, but it drops to the warning interval once any instance is
+    inside its warning window — otherwise a 15s poll could not send a message every 4s.
+    """
+    now = datetime.now()
+    for scheduled in due.values():
+        if scheduled is None:
+            continue
+        remaining = (scheduled - now).total_seconds()
+        if 0 < remaining <= config.rcon.warning_lead_seconds:
+            return float(config.rcon.warning_interval_seconds)
+    return float(config.supervise_poll_seconds)
+
+
+def _warn_players(
+    config: Config,
+    instance_name: str,
+    warned: dict[str, datetime],
+    *,
+    remaining: float,
+    final: bool = False,
+) -> None:
+    """Announce an incoming restart over RCON.
+
+    Rate-limited to the configured interval, and completely non-fatal: an unreachable
+    RCON port must never delay or prevent the restart itself (Rule 4). A failure is
+    logged once per attempt and the loop carries on.
+    """
+    now = datetime.now()
+    last = warned.get(instance_name)
+    interval = config.rcon.warning_interval_seconds
+    if not final and last is not None and (now - last).total_seconds() < interval:
+        return
+
+    message = config.rcon.warning_message.format(remaining=humanize(remaining))
+    try:
+        client = rcon_client(config, instance_name)
+    except RconError as exc:
+        _log.error("instance %s: rcon unavailable for restart warning: %s", instance_name, exc)
+        warned[instance_name] = now
+        return
+    if client is None:
+        return
+
+    try:
+        client.say(message)
+        warned[instance_name] = now
+    except RconError as exc:
+        _log.error("instance %s: could not send restart warning: %s", instance_name, exc)
+        warned[instance_name] = now
+    finally:
+        client.close()
 
 
 def _create_time(pid: int) -> float | None:

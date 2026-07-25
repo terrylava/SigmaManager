@@ -19,6 +19,19 @@ snapshot_strategy = "copy"
 # persistence storage, so instances sharing one clobber each other's economy and saves.
 per_instance_missions = true
 
+[rcon]
+# BattlEye RCON, used for restart warnings and admin chat. An instance takes part only
+# when it sets rcon_port — dzsm will not guess a port.
+host = "127.0.0.1"
+# The password is read from this env var, never from config. It must match RConPassword
+# in the server's BEServer config (under <profiles>/BattlEye/).
+password_env = "DZSM_RCON_PASSWORD"
+# Warnings start this long before a scheduled restart, and repeat this often.
+warning_lead_seconds = 300
+warning_interval_seconds = 4
+# {remaining} becomes "5 minutes", "1 minute", "20 seconds".
+warning_message = "Server restart in {remaining}"
+
 [steam]
 username = "your_steam_account"
 # The password is read from this environment variable, never from this file.
@@ -64,6 +77,11 @@ server_mods = []
 # unused, and cannot be deleted without --force — so its cache survives and re-enabling
 # it is moving the name back to `mods`, not re-downloading several GB.
 keep_mods = []
+# BattlEye RCON port, from this server's BEServer config (RConPort). Without it the
+# instance gets no restart warnings and no admin chat.
+# rcon_port = 2306
+# Env var for this instance's RCON password, if it differs from the global one.
+# rcon_password_env = "DZSM_RCON_PASSWORD_CHERNARUS"
 # Mission directory for this instance. Omit to derive "<instance>.<terrain>".
 # mission = "pvp.chernarusplus"
 # What to seed it from, by name under the server's mpmissions/. Omit to use whatever the

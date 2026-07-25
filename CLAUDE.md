@@ -159,6 +159,18 @@ downloaded, and the instance pin beats the global external path on purpose (more
 intent). The choice activates at start and lands in `state.server_builds`, exactly like
 mod versions — a new build never takes effect under a running server.
 
+**RCON is BattlEye's protocol** (`dzsm/rcon.py`): UDP, CRC32-framed, sequence-numbered.
+A wrong CRC gets *no reply at all* rather than an error, so framing bugs look exactly like
+an unreachable server — hence the byte-level tests. Server-message packets must be
+acknowledged or BattlEye retransmits them, and they interleave with command replies, so
+the client acks and keeps waiting rather than treating one as the answer.
+
+Scheduled restarts broadcast `say -1` every `warning_interval_seconds` (4) for the last
+`warning_lead_seconds` (300), and the supervise tick shortens to match — a 15s poll cannot
+deliver a message every 4s. **A warning failure must never affect the restart**: an
+unreachable port or bad password is logged and the restart proceeds. Same reasoning as
+Rule 4 — a silent restart is a nuisance, a server that fails to restart is an outage.
+
 **Missions are per-instance by default** (`per_instance_missions`). The engine has no
 mission path argument, so this means per-instance mission *names* — `<instance>.<terrain>`
 inside the server's `mpmissions/`, seeded once from a vanilla mission and never

@@ -91,6 +91,29 @@ class ApiConfig(BaseModel):
         return os.environ.get(self.token_env) or None
 
 
+class RconConfig(BaseModel):
+    """BattlEye RCON, used for restart warnings and admin chat.
+
+    Off unless an instance sets `rcon_port` — dzsm will not guess a port, and a wrong
+    guess means silently talking to nothing.
+    """
+
+    host: str = "127.0.0.1"
+    # Name of the env var holding the RCON password. Like every other credential here,
+    # the password itself is never in config.
+    password_env: str = "DZSM_RCON_PASSWORD"  # noqa: S105 — a var name, not a secret
+    timeout_seconds: float = 5.0
+    # How long before a scheduled restart the warnings start.
+    warning_lead_seconds: int = 300
+    # How often to repeat them during that window.
+    warning_interval_seconds: int = 4
+    # {remaining} is filled with a human phrase like "2 minutes" or "20 seconds".
+    warning_message: str = "Server restart in {remaining}"
+
+    def password(self, override_env: str | None = None) -> str | None:
+        return os.environ.get(override_env or self.password_env) or None
+
+
 class InstanceConfig(BaseModel):
     """One server instance."""
 
@@ -102,6 +125,11 @@ class InstanceConfig(BaseModel):
     # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
     # for things like admin tools and server-side logic. Same ordering rule applies.
     server_mods: list[str] = Field(default_factory=list)
+    # BattlEye RCON port for this instance, from its BEServer config's RConPort. None
+    # disables RCON here — no restart warnings, no admin chat.
+    rcon_port: int | None = None
+    # Env var holding this instance's RCON password, when it differs from the global one.
+    rcon_password_env: str | None = None
     # Mission directory name for this instance, e.g. "pvp.chernarusplus". None derives
     # "<instance>.<terrain>" from mission_source. dzsm keeps serverDZ.cfg's `template`
     # pointed at whatever this resolves to.
@@ -137,6 +165,7 @@ class Config(BaseModel):
     mods: dict[str, Mod] = Field(default_factory=dict)
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    rcon: RconConfig = Field(default_factory=RconConfig)
     # Optional retention window, in days. None (the default) means nothing is ever
     # deleted automatically — versions accumulate until someone removes one. Setting a
     # number opts in to automatic pruning of versions that are unused, not the newest for
