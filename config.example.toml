@@ -5,8 +5,11 @@
 # `C:\Users\you\Documents\DayZ Server Manager`. Config load validates this and fails.
 root = 'D:\dz'
 
-# Note: old versions are never deleted automatically. `dzsm mods versions` lists what is
-# cached and what is unused; `dzsm mods delete <mod> <version>` removes one explicitly.
+# Old versions are kept indefinitely unless you opt in here. Uncomment to have versions
+# that are unused, not the newest for their mod, and older than N days pruned after
+# `dzsm mods update`. `dzsm mods versions` lists what is cached; `dzsm mods delete <mod>
+# <version>` removes one explicitly; `dzsm mods prune` applies the policy on demand.
+# gc_retention_days = 7
 # "copy" is the only trusted strategy. "hardlink" is an untested optimization (spec §12)
 # that silently corrupts old versions if steamcmd writes files in place.
 snapshot_strategy = "copy"

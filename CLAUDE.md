@@ -115,12 +115,18 @@ cleanly.
 Also done: config models + validation, state models + atomic I/O,
 `is_reparse_point`/`safe_rmtree`, launch-arg construction, `mods list`, refcounting.
 
-**Versions are never deleted automatically** (spec §8, revised 2026-07-25 — the original
-time-based GC was dropped). `dzsm mods versions` reports; `dzsm mods delete <mod>
-<version>` removes one explicitly. Deletion refuses a version an instance is pinned to
-(`--force` overrides, and clears the pin), and *never* one a running instance is pinned
-to — the server holds OS-level locks on those files, `--force` included. Do not
-reintroduce a retention timer.
+**Automatic deletion is opt-in and off by default** (spec §8, revised 2026-07-25 — the
+original always-on GC was made optional). `gc_retention_days` is unset unless the user
+sets it; do not give it a default. When enabled, pruning removes only versions that are
+unused, **not the newest for their mod**, and past the window — that middle condition is
+what stops it deleting an update nobody has activated yet.
+
+`dzsm mods versions` reports, `dzsm mods prune` applies the policy (dry run without
+`--apply`), `dzsm mods delete <mod> <version>` removes one explicitly. Deletion refuses a
+version an instance is pinned to (`--force` overrides, and clears the pin), and *never*
+one a running instance is pinned to — the server holds OS-level locks on those files,
+`--force` included. Pruning goes through the same path, so automation gets no extra
+privileges.
 
 Still stubbed: `steam.update_server_app`, `api.py`.
 

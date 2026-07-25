@@ -287,6 +287,81 @@ def delete_version(
     return path
 
 
+def prunable(
+    config: Config,
+    state: State,
+    *,
+    retention_days: int | None = None,
+) -> list[VersionStatus]:
+    """Versions the retention policy would remove. Empty when the policy is off.
+
+    Three conditions, all required:
+
+    1. No instance is pinned to it.
+    2. It is not the newest version of its mod. A freshly downloaded version that no
+       instance has activated yet is unused by definition — expiring it would delete the
+       update you just fetched.
+    3. It is older than the retention window.
+
+    Selection only; this deletes nothing.
+    """
+    days = retention_days if retention_days is not None else config.gc_retention_days
+    if days is None:
+        return []
+
+    return [
+        status
+        for status in version_status(config, state)
+        if not status.in_use
+        and not status.is_latest
+        and status.age_days is not None
+        and status.age_days >= days
+    ]
+
+
+def collect_garbage(
+    config: Config,
+    state: State,
+    *,
+    running_instances: Collection[str] = (),
+    retention_days: int | None = None,
+    dry_run: bool = True,
+) -> list[Path]:
+    """Apply the optional retention policy (spec §8).
+
+    Opt-in: with gc_retention_days unset this is a no-op, which is the default. Even when
+    enabled it goes through delete_version, so the pinned and running-instance refusals
+    apply exactly as they do to a manual delete — automation gets no extra privileges.
+
+    A version that cannot be removed is logged and skipped rather than aborting the run
+    (Rule 3). Returns what was deleted, or what would be when dry_run.
+    """
+    candidates = prunable(config, state, retention_days=retention_days)
+    if dry_run:
+        return [status.path for status in candidates]
+
+    deleted: list[Path] = []
+    for status in candidates:
+        try:
+            deleted.append(
+                delete_version(
+                    config,
+                    state,
+                    status.workshop_id,
+                    status.version,
+                    running_instances=running_instances,
+                )
+            )
+        except ModCacheError as exc:
+            _log.error(
+                "mods: could not prune mod %s version %s: %s",
+                status.workshop_id,
+                status.version,
+                exc,
+            )
+    return deleted
+
+
 def _workshop_id_of(config: Config, mod_name: str) -> int | None:
     mod = config.mods.get(mod_name)
     return mod.workshop_id if isinstance(mod, WorkshopMod) else None

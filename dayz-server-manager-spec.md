@@ -297,22 +297,41 @@ with slightly stale mods beats a server that is down.
 ## 8. Version retention
 
 > **Revised 2026-07-25.** This section originally specified time-based garbage
-> collection: delete a version once its refcount is 0 and it is older than N days.
-> That was dropped. **Nothing is ever deleted automatically.** A retention timer
-> eventually eats a version somebody still wanted, and it does so unattended, on a box
-> where the whole point of the design is that old versions stay reachable.
+> collection as the only behaviour, on by default with a 7-day window. It is now
+> **opt-in and off by default**: `gc_retention_days` is unset unless you set it. An
+> always-on retention timer eventually eats a version somebody still wanted, unattended,
+> on a box where the whole point of the design is that old versions stay reachable.
+> Turning it on is a deliberate choice about a specific disk.
 
 `state.json` tracks which instance is pinned to which version.
 
-- Versions accumulate until a human deletes one. Disk is cheap; an unavailable rollback
-  during an incident is not.
+- With retention off (the default), versions accumulate until a human deletes one. Disk
+  is cheap; an unavailable rollback during an incident is not.
 - `dzsm mods versions` reports every cached version with its size, age, whether it is the
   latest, which instances are pinned to it, and whether it is still on disk. It reclaims
   nothing.
 - `dzsm mods delete <mod> <version>` removes exactly one version, and only because it was
   asked to.
 
-Deletion refuses in two cases:
+### Optional retention
+
+Set `gc_retention_days = N` to opt in to automatic pruning. A version is removed only
+when **all three** hold:
+
+1. No instance is pinned to it.
+2. It is not the newest version of its mod. A freshly downloaded version nothing has
+   activated yet is unused by definition — expiring it would delete the update you just
+   fetched.
+3. It is older than N days.
+
+Pruning runs after `dzsm mods update`, which is when new versions arrive. `dzsm mods
+prune` applies the policy on demand and is a dry run unless given `--apply`;
+`--older-than N` overrides the configured window, and works even when retention is off.
+
+**Automation gets no extra privileges.** Pruning goes through the same delete path as a
+manual removal, so both refusals below apply to it identically.
+
+### Deletion refuses in two cases:
 
 1. **An instance is pinned to it.** That instance would fail to start, or lose a mod, at
    its next restart. `--force` overrides this for a stale pin, and clears the pin so

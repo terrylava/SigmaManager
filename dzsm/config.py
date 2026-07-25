@@ -92,8 +92,11 @@ class Config(BaseModel):
     steam: SteamConfig
     mods: dict[str, Mod] = Field(default_factory=dict)
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
-    # No retention window: versions are never deleted automatically. The cache is the
-    # rollback path, so a version stays until someone runs `dzsm mods delete`.
+    # Optional retention window, in days. None (the default) means nothing is ever
+    # deleted automatically — versions accumulate until someone removes one. Setting a
+    # number opts in to automatic pruning of versions that are unused, not the newest for
+    # their mod, and older than this. See spec §8.
+    gc_retention_days: int | None = None
     # "hardlink" is the untested optimization in spec §12. It corrupts old version
     # directories if steamcmd writes files in place. Do not default it on.
     snapshot_strategy: Literal["copy", "hardlink"] = "copy"
@@ -215,6 +218,16 @@ class Config(BaseModel):
                     f"instance {instance_name!r} lists {sorted(duplicates)} more than once"
                 )
         return self
+
+    @field_validator("gc_retention_days")
+    @classmethod
+    def _retention_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(
+                f"gc_retention_days must be at least 1 day, got {v}. To disable "
+                f"automatic deletion entirely, omit it or set it to null."
+            )
+        return v
 
     @model_validator(mode="after")
     def _ports_are_unique(self) -> Config:

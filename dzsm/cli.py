@@ -15,7 +15,14 @@ import typer
 from dzsm import runner
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
-from dzsm.mods import ModCacheError, delete_version, promote_snapshot, version_status
+from dzsm.mods import (
+    ModCacheError,
+    collect_garbage,
+    delete_version,
+    promote_snapshot,
+    prunable,
+    version_status,
+)
 from dzsm.runner import RunnerError
 from dzsm.state import State, StateError, load_state, save_state
 from dzsm.steam import (
@@ -206,6 +213,15 @@ def mods_update(
         _save_state(cfg, state)
         typer.secho(f"{name}: promoted {latest} -> {path}", fg=typer.colors.GREEN)
 
+    # Automatic pruning is opt-in and runs here because this is when new versions arrive.
+    # With gc_retention_days unset this is a no-op.
+    if cfg.gc_retention_days is not None:
+        running = [name for name in cfg.instances if runner.is_running(cfg, state, name)]
+        pruned = collect_garbage(cfg, state, running_instances=running, dry_run=False)
+        _save_state(cfg, state)
+        for path in pruned:
+            typer.echo(f"pruned {path}")
+
     if failures:
         typer.secho(f"{failures} mod(s) failed", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
@@ -277,6 +293,61 @@ def mods_versions(
         megabytes = reclaimable / (1024 * 1024)
         typer.echo("")
         typer.echo(f"{megabytes:.1f} MiB in unused versions (kept until deleted)")
+
+
+@mods_app.command("prune")
+def mods_prune(
+    config_path: ConfigPath = Path("config.toml"),
+    older_than: Annotated[
+        Optional[int],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Option("--older-than", help="Days. Overrides gc_retention_days for this run."),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually delete. Default is a dry run."),
+    ] = False,
+) -> None:
+    """Apply the retention policy: remove unused, non-latest versions past the window.
+
+    Off unless gc_retention_days is set in config or --older-than is passed. Dry run by
+    default. Versions pinned to an instance, or to a running one, are never removed.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+
+    if older_than is None and cfg.gc_retention_days is None:
+        typer.echo(
+            "retention is disabled (gc_retention_days is unset). "
+            "Pass --older-than N, or set it in config."
+        )
+        return
+
+    running = [name for name in cfg.instances if runner.is_running(cfg, state, name)]
+    candidates = prunable(cfg, state, retention_days=older_than)
+    if not candidates:
+        typer.echo("nothing past the retention window")
+        return
+
+    total = sum(status.size_bytes for status in candidates)
+    for status in candidates:
+        name = status.mod_name or str(status.workshop_id)
+        age = f"{status.age_days:.1f}d" if status.age_days is not None else "?"
+        size = status.size_bytes / (1024 * 1024)
+        typer.echo(f"{name:<20} {status.version:<12} {size:>8.1f} MiB  {age}")
+
+    if not apply:
+        typer.echo("")
+        typer.echo(f"would free {total / (1024 * 1024):.1f} MiB — re-run with --apply")
+        return
+
+    try:
+        deleted = collect_garbage(
+            cfg, state, running_instances=running, retention_days=older_than, dry_run=False
+        )
+    finally:
+        _save_state(cfg, state)
+
+    typer.secho(f"deleted {len(deleted)} version(s)", fg=typer.colors.GREEN)
 
 
 @mods_app.command("delete")

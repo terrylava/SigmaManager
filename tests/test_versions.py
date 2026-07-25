@@ -8,12 +8,20 @@ prevent — removing files a running server has open, or a version an instance s
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from dzsm.config import Config, InstanceConfig, WorkshopMod
-from dzsm.mods import ModCacheError, delete_version, version_status
+from dzsm.mods import (
+    ModCacheError,
+    collect_garbage,
+    delete_version,
+    prunable,
+    version_status,
+)
 from dzsm.state import State
 
 WORKSHOP_ID = 1559212036
@@ -170,3 +178,123 @@ def test_deletion_leaves_other_versions_untouched(cfg: Config) -> None:
     delete_version(cfg, state, WORKSHOP_ID, OLD)
 
     assert (kept / "mod.pbo").exists()
+
+
+# --- optional retention policy -----------------------------------------------
+
+
+def _age(state: State, version: int, days: float) -> None:
+    record = state.versions[WORKSHOP_ID][version]
+    record.downloaded_at = datetime.now(UTC) - timedelta(days=days)
+
+
+def test_retention_is_off_by_default(cfg: Config) -> None:
+    """gc_retention_days unset means nothing is ever selected for deletion."""
+    state = State()
+    _cached(cfg, state, OLD)
+    _cached(cfg, state, NEW)
+    _age(state, OLD, days=365)
+
+    assert cfg.gc_retention_days is None
+    assert prunable(cfg, state) == []
+    assert collect_garbage(cfg, state, dry_run=False) == []
+
+
+def test_retention_selects_old_unused_versions_when_enabled(cfg: Config) -> None:
+    enabled = cfg.model_copy(update={"gc_retention_days": 7})
+    state = State()
+    _cached(enabled, state, OLD)
+    _cached(enabled, state, NEW)
+    _age(state, OLD, days=30)
+
+    assert [s.version for s in prunable(enabled, state)] == [OLD]
+
+
+def test_retention_never_removes_the_newest_version(cfg: Config) -> None:
+    """A freshly downloaded version nothing has activated yet is unused by definition —
+    expiring it would delete the update you just fetched."""
+    enabled = cfg.model_copy(update={"gc_retention_days": 7})
+    state = State()
+    _cached(enabled, state, NEW)
+    _age(state, NEW, days=999)
+
+    assert prunable(enabled, state) == []
+
+
+def test_retention_never_removes_a_pinned_version(cfg: Config) -> None:
+    enabled = cfg.model_copy(update={"gc_retention_days": 7})
+    state = State()
+    _cached(enabled, state, OLD)
+    _cached(enabled, state, NEW)
+    _age(state, OLD, days=30)
+    state.pins["chernarus"] = {"CF": OLD}
+
+    assert prunable(enabled, state) == []
+
+
+def test_retention_respects_the_window(cfg: Config) -> None:
+    enabled = cfg.model_copy(update={"gc_retention_days": 30})
+    state = State()
+    _cached(enabled, state, OLD)
+    _cached(enabled, state, NEW)
+    _age(state, OLD, days=10)
+
+    assert prunable(enabled, state) == []
+
+
+def test_older_than_overrides_the_configured_window(cfg: Config) -> None:
+    state = State()
+    _cached(cfg, state, OLD)
+    _cached(cfg, state, NEW)
+    _age(state, OLD, days=10)
+
+    assert [s.version for s in prunable(cfg, state, retention_days=5)] == [OLD]
+
+
+def test_collect_garbage_dry_run_deletes_nothing(cfg: Config) -> None:
+    enabled = cfg.model_copy(update={"gc_retention_days": 7})
+    state = State()
+    path = _cached(enabled, state, OLD)
+    _cached(enabled, state, NEW)
+    _age(state, OLD, days=30)
+
+    assert collect_garbage(enabled, state, dry_run=True) == [path]
+    assert path.is_dir()
+
+
+def test_collect_garbage_applies(cfg: Config) -> None:
+    enabled = cfg.model_copy(update={"gc_retention_days": 7})
+    state = State()
+    path = _cached(enabled, state, OLD)
+    _cached(enabled, state, NEW)
+    _age(state, OLD, days=30)
+
+    collect_garbage(enabled, state, dry_run=False)
+
+    assert not path.exists()
+    assert state.known_versions(WORKSHOP_ID) == [NEW]
+
+
+def test_automatic_pruning_gets_no_extra_privileges(cfg: Config) -> None:
+    """Automation goes through delete_version, so a running instance still blocks it."""
+    enabled = cfg.model_copy(update={"gc_retention_days": 7})
+    state = State()
+    path = _cached(enabled, state, OLD)
+    _cached(enabled, state, NEW)
+    _age(state, OLD, days=30)
+    state.pins["chernarus"] = {"CF": OLD}
+
+    # Pinned, so prunable() excludes it; force the issue by pruning the exact version.
+    with pytest.raises(ModCacheError, match="running instance"):
+        delete_version(
+            enabled, state, WORKSHOP_ID, OLD, running_instances=["chernarus"], force=True
+        )
+    assert path.is_dir()
+
+
+def test_zero_retention_is_rejected(cfg: Config) -> None:
+    """0 would mean 'delete everything immediately' — almost certainly a typo."""
+    with pytest.raises(ValidationError, match="at least 1 day"):
+        cfg.model_copy(update={"gc_retention_days": 0}).model_validate(
+            {**cfg.model_dump(), "gc_retention_days": 0}
+        )
