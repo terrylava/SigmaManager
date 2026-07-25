@@ -354,8 +354,10 @@ def mods_versions(
         name = status.mod_name or f"(unconfigured {status.workshop_id})"
         age = f"{status.age_days:.1f}d" if status.age_days is not None else "?"
         size = f"{status.size_bytes / (1024 * 1024):.1f} MiB"
-        if status.in_use:
+        if status.pinned_by:
             tag = typer.style(f"in use by {', '.join(status.pinned_by)}", fg=typer.colors.GREEN)
+        elif status.kept_by:
+            tag = typer.style(f"kept by {', '.join(status.kept_by)}", fg=typer.colors.CYAN)
         else:
             tag = typer.style("unused", fg=typer.colors.YELLOW)
             reclaimable += status.size_bytes
@@ -382,15 +384,21 @@ def mods_unused(
         bool,
         typer.Option("--all", help="Select every removable unused mod."),
     ] = False,
+    include_kept: Annotated[
+        bool,
+        typer.Option("--include-kept", help="Also show mods held by keep_mods."),
+    ] = False,
 ) -> None:
     """Find mods nothing references, and optionally remove them.
 
     Covers both mods configured but listed by no instance, and cache directories for
-    mods that are no longer in config at all. Reports only unless --select or --all.
+    mods that are no longer in config at all. Mods held by an instance's keep_mods are
+    excluded — being deliberately retained is the opposite of unused. Reports only
+    unless --select or --all.
     """
     cfg = _load_config(config_path)
     state = _load_state(cfg)
-    unused = unused_mods(cfg, state)
+    unused = unused_mods(cfg, state, include_kept=include_kept)
 
     if not unused:
         typer.echo("no unused mods")
@@ -442,7 +450,9 @@ def _echo_unused(index: int, mod: UnusedMod) -> None:
     identifier = mod.workshop_id if mod.workshop_id is not None else "local"
     size = f"{mod.size_bytes / (1024 * 1024):.1f} MiB"
     detail = f"{len(mod.versions)} version(s)" if mod.versions else "no cached versions"
-    if mod.kind == "local":
+    if mod.kept_by:
+        tag = typer.style(f"kept by {', '.join(mod.kept_by)}", fg=typer.colors.CYAN)
+    elif mod.kind == "local":
         tag = typer.style("local — not removable by dzsm", fg=typer.colors.BLUE)
     elif mod.kind == "orphaned":
         tag = typer.style("orphaned cache", fg=typer.colors.YELLOW)
@@ -476,11 +486,12 @@ def _prompt_for_selection(unused: list[UnusedMod]) -> list[UnusedMod]:
             continue
         mod = unused[int(token) - 1]
         if not mod.deletable:
-            typer.secho(
-                f"skipping {mod.mod_name}: local mods are hand-authored source, "
-                f"dzsm will not delete them",
-                fg=typer.colors.YELLOW,
+            reason = (
+                f"kept by {', '.join(mod.kept_by)}"
+                if mod.kept_by
+                else "local mods are hand-authored source, dzsm will not delete them"
             )
+            typer.secho(f"skipping {mod.mod_name}: {reason}", fg=typer.colors.YELLOW)
             continue
         chosen.append(mod)
     return chosen

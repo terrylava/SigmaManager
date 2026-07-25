@@ -204,6 +204,7 @@ def create_app(config_path: Path) -> FastAPI:
                 "age_days": s.age_days,
                 "in_use": s.in_use,
                 "pinned_by": s.pinned_by,
+                "kept_by": s.kept_by,
                 "is_latest": s.is_latest,
                 "exists": s.exists,
             }
@@ -211,7 +212,7 @@ def create_app(config_path: Path) -> FastAPI:
         ]
 
     @app.get("/api/unused")
-    def list_unused() -> list[dict[str, Any]]:
+    def list_unused(include_kept: bool = False) -> list[dict[str, Any]]:
         state = current_state()
         return [
             {
@@ -222,9 +223,10 @@ def create_app(config_path: Path) -> FastAPI:
                 "size_bytes": m.size_bytes,
                 "path": str(m.path),
                 "pinned_by": m.pinned_by,
+                "kept_by": m.kept_by,
                 "deletable": m.deletable,
             }
-            for m in unused_mods(config, state)
+            for m in unused_mods(config, state, include_kept=include_kept)
         ]
 
     @app.get("/api/server")

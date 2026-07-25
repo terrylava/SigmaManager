@@ -213,14 +213,22 @@ def _versions_to_activate(config: Config, state: State, instance_name: str) -> d
         if not previous:
             # Nothing to fall back to. This is a genuine first-start failure.
             raise
+
+        # Drop entries for mods this instance no longer references. Even on the fallback
+        # path, pins must describe what is actually being loaded — a stale name left here
+        # would keep claiming a version forever and block its deletion.
+        instance = config.instances[instance_name]
+        referenced = {*instance.mods, *instance.server_mods}
+        fallback = {name: version for name, version in previous.items() if name in referenced}
+
         _log.error(
             "instance %s: could not resolve current mod versions (%s); starting on the "
             "previous versions %s instead",
             instance_name,
             exc,
-            previous,
+            fallback,
         )
-        return dict(previous)
+        return fallback
 
 
 def _create_time(pid: int) -> float | None:

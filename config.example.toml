@@ -55,6 +55,10 @@ mods = ["CF", "Expansion"]
 # server-side logic belong here. Same ordering rule. A mod goes in one list or the
 # other — never both.
 server_mods = []
+# Temporarily disabled but retained. A mod here is not launched, is not reported as
+# unused, and cannot be deleted without --force — so its cache survives and re-enabling
+# it is moving the name back to `mods`, not re-downloading several GB.
+keep_mods = []
 restart_schedule = ["04:00", "10:00", "16:00", "22:00"]
 
 [instances.testing]

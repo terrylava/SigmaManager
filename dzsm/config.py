@@ -102,6 +102,11 @@ class InstanceConfig(BaseModel):
     # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
     # for things like admin tools and server-side logic. Same ordering rule applies.
     server_mods: list[str] = Field(default_factory=list)
+    # Mods this instance keeps a claim on without loading them. A mod moved here is
+    # temporarily disabled, not abandoned: it stops being launched, but it no longer
+    # shows up as unused and cannot be swept away by a cleanup. Move it back to `mods`
+    # to re-enable it, with its cached versions still there.
+    keep_mods: list[str] = Field(default_factory=list)
     # "HH:MM" local times.
     restart_schedule: list[str] = Field(default_factory=list)
     extra_args: list[str] = Field(default_factory=list)
@@ -237,7 +242,11 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _instances_reference_known_mods(self) -> Config:
         for instance_name, instance in self.instances.items():
-            for field, names in (("mods", instance.mods), ("server_mods", instance.server_mods)):
+            for field, names in (
+                ("mods", instance.mods),
+                ("server_mods", instance.server_mods),
+                ("keep_mods", instance.keep_mods),
+            ):
                 for mod_name in names:
                     if mod_name not in self.mods:
                         raise ValueError(
@@ -258,6 +267,18 @@ class Config(BaseModel):
                 raise ValueError(
                     f"instance {instance_name!r} lists {sorted(both)} in both mods and "
                     f"server_mods; a mod belongs to one or the other"
+                )
+
+            # keep_mods means "disabled but retained". Listing a mod there *and* loading
+            # it is contradictory, and silently ignoring one of the two would make it
+            # unclear which won.
+            loaded = {*instance.mods, *instance.server_mods}
+            contradictory = loaded & set(instance.keep_mods)
+            if contradictory:
+                raise ValueError(
+                    f"instance {instance_name!r} lists {sorted(contradictory)} in "
+                    f"keep_mods while also loading it; keep_mods is for mods that are "
+                    f"temporarily disabled"
                 )
         return self
 

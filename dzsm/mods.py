@@ -10,7 +10,7 @@ import logging
 import os
 import shutil
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -166,10 +166,16 @@ class VersionStatus:
     downloaded_at: datetime | None
     pinned_by: list[str]
     is_latest: bool
+    kept_by: list[str] = field(default_factory=list)
 
     @property
     def in_use(self) -> bool:
-        return bool(self.pinned_by)
+        """Pinned by a running config, or held by a keep_mods claim.
+
+        Both mean "do not reclaim this". Folding them together here is what stops the
+        retention policy quietly expiring a mod that is only temporarily disabled.
+        """
+        return bool(self.pinned_by or self.kept_by)
 
     @property
     def age_days(self) -> float | None:
@@ -193,6 +199,7 @@ def version_status(config: Config, state: State) -> list[VersionStatus]:
         for name, mod in config.mods.items()
         if isinstance(mod, WorkshopMod)
     }
+    keeps = kept_by(config)
 
     statuses: list[VersionStatus] = []
     for workshop_id, versions in state.versions.items():
@@ -216,6 +223,7 @@ def version_status(config: Config, state: State) -> list[VersionStatus]:
                     downloaded_at=record.downloaded_at,
                     pinned_by=pinned_by,
                     is_latest=version == latest,
+                    kept_by=keeps.get(mod_name, []) if mod_name else [],
                 )
             )
 
@@ -256,6 +264,22 @@ def delete_version(
             f"refusing to delete mod {workshop_id} version {version}: it is in use by "
             f"running instance(s) {', '.join(running_pins)}. A running DayZ server holds "
             f"OS-level locks on its mod files — stop the instance first."
+        )
+
+    # A kept mod is temporarily disabled, not abandoned. Deleting its versions is the
+    # exact thing keep_mods exists to prevent, so the guard belongs here as well as in
+    # remove_mod — a per-version delete would otherwise walk straight around it.
+    keeping = sorted(
+        instance
+        for mod_name, instances in kept_by(config).items()
+        for instance in instances
+        if _workshop_id_of(config, mod_name) == workshop_id
+    )
+    if keeping and not force:
+        raise ModCacheError(
+            f"refusing to delete mod {workshop_id} version {version}: instance(s) "
+            f"{', '.join(keeping)} keep this mod (temporarily disabled, not abandoned). "
+            f"Remove it from their keep_mods first, or pass force."
         )
 
     if pinned_by and not force:
@@ -314,18 +338,45 @@ class UnusedMod:
     size_bytes: int
     path: Path
     pinned_by: list[str]
+    kept_by: list[str] = field(default_factory=list)
 
     @property
     def deletable(self) -> bool:
-        return self.kind != "local"
+        """Local mods are hand-authored source; kept mods are deliberately retained."""
+        return self.kind != "local" and not self.kept_by
 
 
-def unused_mods(config: Config, state: State) -> list[UnusedMod]:
+def kept_by(config: Config) -> dict[str, list[str]]:
+    """Mod name -> instances that keep a claim on it without loading it.
+
+    A kept mod is temporarily disabled, not abandoned. It does not appear as unused and
+    cannot be removed by a cleanup, so its cache survives until it is re-enabled.
+    """
+    claims: dict[str, list[str]] = {}
+    for instance_name, instance in config.instances.items():
+        for mod_name in instance.keep_mods:
+            claims.setdefault(mod_name, []).append(instance_name)
+    return {name: sorted(instances) for name, instances in claims.items()}
+
+
+def unused_mods(
+    config: Config, state: State, *, include_kept: bool = False
+) -> list[UnusedMod]:
     """Every mod nothing references. Reporting only — deletes nothing.
+
+    Mods kept by an instance (`keep_mods`) are excluded unless include_kept, since being
+    deliberately retained is the opposite of being unused.
 
     Returns a list, empty when everything is in use. Never None (Rule 1).
     """
-    referenced = {name for instance in config.instances.values() for name in instance.mods}
+    keeps = kept_by(config)
+    referenced = {
+        name
+        for instance in config.instances.values()
+        for name in (*instance.mods, *instance.server_mods)
+    }
+    if not include_kept:
+        referenced |= set(keeps)
     configured_ids = {
         mod.workshop_id for mod in config.mods.values() if isinstance(mod, WorkshopMod)
     }
@@ -337,6 +388,7 @@ def unused_mods(config: Config, state: State) -> list[UnusedMod]:
         pinned_by = sorted(
             instance for instance, pins in state.pins.items() if name in pins
         )
+        claimed = keeps.get(name, [])
         if isinstance(mod, WorkshopMod):
             versions = state.known_versions(mod.workshop_id)
             directory = config.modcache_dir / str(mod.workshop_id)
@@ -344,11 +396,12 @@ def unused_mods(config: Config, state: State) -> list[UnusedMod]:
                 UnusedMod(
                     mod_name=name,
                     workshop_id=mod.workshop_id,
-                    kind="unreferenced",
+                    kind="kept" if claimed else "unreferenced",
                     versions=versions,
                     size_bytes=_tree_size(directory),
                     path=directory,
                     pinned_by=pinned_by,
+                    kept_by=claimed,
                 )
             )
         else:
@@ -361,6 +414,7 @@ def unused_mods(config: Config, state: State) -> list[UnusedMod]:
                     size_bytes=_tree_size(mod.path),
                     path=mod.path,
                     pinned_by=pinned_by,
+                    kept_by=claimed,
                 )
             )
 
@@ -420,6 +474,20 @@ def remove_mod(
             f"{', '.join(running_pins)}. Stop them first — a running DayZ server holds "
             f"OS-level locks on its mod files."
         )
+
+    keeping = sorted(
+        instance
+        for mod_name, instances in kept_by(config).items()
+        for instance in instances
+        if _workshop_id_of(config, mod_name) == workshop_id
+    )
+    if keeping and not force:
+        raise ModCacheError(
+            f"refusing to remove mod {workshop_id}: instance(s) {', '.join(keeping)} "
+            f"keep it (temporarily disabled, not abandoned). Remove it from their "
+            f"keep_mods first, or pass force."
+        )
+
     if pinned_by and not force:
         raise ModCacheError(
             f"refusing to remove mod {workshop_id}: instance(s) "

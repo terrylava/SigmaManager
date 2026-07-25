@@ -389,6 +389,32 @@ finds three kinds:
 `--select` gives a numbered picker, `--all` takes everything removable, and both confirm
 before deleting. Removal goes through the same refusals as any other delete.
 
+### Keeping a mod through a temporary disable
+
+An instance's `keep_mods` list holds mods it is not currently loading but still claims.
+Moving a name from `mods` to `keep_mods` disables it without abandoning it:
+
+- It is not launched.
+- It is not reported as unused (`--include-kept` shows it, labelled with which instances
+  keep it).
+- **Neither `mods delete` nor `mods unused` removal will touch it** without `--force`.
+
+Re-enabling is moving the name back — the cached versions are still there, so nothing is
+re-downloaded. Without this, disabling a mod for a week meant it looked abandoned to
+every cleanup path, and a `--all` sweep would reclaim it.
+
+The guard lives in `delete_version` as well as `remove_mod`, deliberately: a per-version
+delete would otherwise walk straight around a whole-mod protection and destroy the very
+cache the keep exists to preserve.
+
+### Pins and references refresh on launch
+
+`runner.start` replaces an instance's entire pin map with what it just resolved, so pins
+always describe what is actually loaded. A mod dropped from an instance's config stops
+being pinned at its next start, and its versions become eligible for cleanup without any
+manual bookkeeping. The Rule 4 fallback path filters the previous pins to currently
+referenced mods for the same reason.
+
 ---
 
 ## 9. Local / non-workshop mods

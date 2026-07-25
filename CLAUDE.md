@@ -123,6 +123,13 @@ sets it; do not give it a default. When enabled, pruning removes only versions t
 unused, **not the newest for their mod**, and past the window — that middle condition is
 what stops it deleting an update nobody has activated yet.
 
+**`keep_mods` protects a temporarily disabled mod.** A name moved from an instance's
+`mods` to its `keep_mods` is not launched, is not reported as unused, counts as `in_use`
+for retention, and cannot be deleted without `--force` — so re-enabling it is moving the
+line back, not re-downloading. The guard lives in **both** `delete_version` and
+`remove_mod`: a per-version delete would otherwise walk straight around a whole-mod
+protection, which is a bug that actually shipped once and destroyed a 667 MiB cache.
+
 `dzsm mods versions` reports, `dzsm mods prune` applies the policy (dry run without
 `--apply`), `dzsm mods delete <mod> <version>` removes one explicitly, and `dzsm mods
 unused` finds whole mods nothing references — including **orphaned** cache directories
