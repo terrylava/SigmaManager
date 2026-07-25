@@ -136,7 +136,7 @@ def stop(config: Config, state: State, instance_name: str, *, timeout: float | N
 
     # Escalating: ask nicely over RCON, then signal, then kill. DayZ flushes persistence
     # on its own shutdown path, so #shutdown is the only one that is properly clean.
-    if _request_shutdown(config, instance_name) and _wait_for_exit(process, grace):
+    if _request_shutdown(config, state, instance_name) and _wait_for_exit(process, grace):
         state.processes.pop(instance_name, None)
         _log.info("instance %s: shut down via rcon", instance_name)
         return
@@ -258,6 +258,27 @@ def rcon_client(config: Config, instance_name: str) -> RconClient | None:
     return client
 
 
+def seconds_since_start(state: State, instance_name: str) -> float | None:
+    """How long this instance has been up, or None if dzsm did not start it."""
+    process = state.processes.get(instance_name)
+    started = _local(process.started_at) if process else None
+    if started is None:
+        return None
+    return (datetime.now() - started).total_seconds()
+
+
+def rcon_grace_remaining(config: Config, state: State, instance_name: str) -> float:
+    """Seconds left before RCON is expected to answer. 0 once the window has passed.
+
+    BattlEye binds well after the server is otherwise up, so an attempt inside this window
+    is not evidence of a problem — it is simply early.
+    """
+    uptime = seconds_since_start(state, instance_name)
+    if uptime is None:
+        return 0.0
+    return max(0.0, config.rcon.startup_grace_seconds - uptime)
+
+
 def humanize(seconds: float) -> str:
     """A phrase players will read in chat: "5 minutes", "1 minute", "20 seconds"."""
     total = max(0, int(round(seconds)))
@@ -301,7 +322,7 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
                 scheduled = due[name]
                 if scheduled is not None and now >= scheduled:
                     _log.info("instance %s: scheduled restart", name)
-                    _warn_players(config, name, warned, remaining=0.0, final=True)
+                    _warn_players(config, state, name, warned, remaining=0.0, final=True)
                     _restart_and_save(config, state, name)
                     warned.pop(name, None)
                     # Recomputed after the restart, so an uptime-based window starts
@@ -312,7 +333,11 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
                 if scheduled is not None:
                     # _warn_players decides which tier applies, or stays quiet.
                     _warn_players(
-                        config, name, warned, remaining=(scheduled - now).total_seconds()
+                        config,
+                        state,
+                        name,
+                        warned,
+                        remaining=(scheduled - now).total_seconds(),
                     )
 
                 if not is_running(config, state, name):
@@ -396,6 +421,7 @@ def _tick_seconds(config: Config, due: Mapping[str, datetime | None]) -> float:
 
 def _warn_players(
     config: Config,
+    state: State,
     instance_name: str,
     warned: dict[str, datetime],
     *,
@@ -416,6 +442,11 @@ def _warn_players(
             return
         if last is not None and (now - last).total_seconds() < interval:
             return
+
+    # A restart scheduled very soon after a start (a short restart_after_hours, or a
+    # crash-restart loop) can put a warning inside the window where RCON cannot answer.
+    if rcon_grace_remaining(config, state, instance_name) > 0:
+        return
 
     message = config.rcon.warning_message.format(remaining=humanize(remaining))
     try:
@@ -446,13 +477,25 @@ def _due_at(config: Config, state: State, instance_name: str) -> datetime | None
     )
 
 
-def _request_shutdown(config: Config, instance_name: str) -> bool:
+def _request_shutdown(config: Config, state: State, instance_name: str) -> bool:
     """Ask the server to stop over RCON. True if the request went out.
 
-    False means "fall through to signalling it" — not configured, unreachable, or the
-    server died before replying. Never raises: stopping must work with RCON broken.
+    False means "fall through to signalling it" — not configured, still starting up,
+    unreachable, or the server died before replying. Never raises: stopping must work with
+    RCON broken.
     """
     if not config.rcon.shutdown_via_rcon:
+        return False
+
+    remaining = rcon_grace_remaining(config, state, instance_name)
+    if remaining > 0:
+        # No point waiting out a socket timeout against a port BattlEye has not bound yet.
+        _log.info(
+            "instance %s: only just started, RCON not expected for another %.0fs — "
+            "signalling instead",
+            instance_name,
+            remaining,
+        )
         return False
     try:
         client = rcon_client(config, instance_name)

@@ -14,6 +14,7 @@ import pytest
 from dzsm import runner
 from dzsm.config import Config, InstanceConfig, RconConfig
 from dzsm.rcon import RconError
+from dzsm.state import ProcessInfo, State
 
 
 @pytest.fixture
@@ -123,7 +124,7 @@ def test_a_warning_is_sent(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None
     recorder = _Recorder()
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
 
-    runner._warn_players(cfg, "chernarus", {}, remaining=120)
+    runner._warn_players(cfg, State(), "chernarus", {}, remaining=120)
 
     assert recorder.said == ["Server restart in 2 minutes"]
     assert recorder.closed is True
@@ -134,7 +135,7 @@ def test_warnings_respect_the_interval(cfg: Config, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
     warned = {"chernarus": datetime.now()}
 
-    runner._warn_players(cfg, "chernarus", warned, remaining=120)
+    runner._warn_players(cfg, State(), "chernarus", warned, remaining=120)
 
     assert recorder.said == [], "a warning one second after the last must be suppressed"
 
@@ -146,7 +147,7 @@ def test_a_warning_is_sent_once_the_interval_has_passed(
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
     warned = {"chernarus": datetime.now() - timedelta(seconds=10)}
 
-    runner._warn_players(cfg, "chernarus", warned, remaining=60)
+    runner._warn_players(cfg, State(), "chernarus", warned, remaining=60)
 
     assert recorder.said == ["Server restart in 1 minute"]
 
@@ -159,7 +160,7 @@ def test_the_final_warning_ignores_the_interval(
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
     warned = {"chernarus": datetime.now()}
 
-    runner._warn_players(cfg, "chernarus", warned, remaining=0, final=True)
+    runner._warn_players(cfg, State(), "chernarus", warned, remaining=0, final=True)
 
     assert recorder.said == ["Server restart in 0 seconds"]
 
@@ -172,7 +173,7 @@ def test_a_failing_send_does_not_raise(cfg: Config, monkeypatch: pytest.MonkeyPa
     recorder = _Recorder(fail=True)
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
 
-    runner._warn_players(cfg, "chernarus", {}, remaining=60)
+    runner._warn_players(cfg, State(), "chernarus", {}, remaining=60)
 
     assert recorder.closed is True, "the socket is still closed on the failure path"
 
@@ -184,7 +185,26 @@ def test_an_unreachable_rcon_does_not_raise(
         raise RconError("connect failed")
 
     monkeypatch.setattr(runner, "rcon_client", unreachable)
-    runner._warn_players(cfg, "chernarus", {}, remaining=60)
+    runner._warn_players(cfg, State(), "chernarus", {}, remaining=60)
+
+
+def test_no_warning_while_the_instance_is_still_starting(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A short restart_after_hours, or a crash-restart loop, can put a warning inside the
+    window where BattlEye has not bound the port yet."""
+    recorder = _Recorder()
+    monkeypatch.setattr(
+        runner, "rcon_client", lambda config, name: pytest.fail("should not connect")
+    )
+    state = State()
+    state.processes["chernarus"] = ProcessInfo(
+        pid=1, port=2302, started_at=datetime.now().astimezone(), create_time=None
+    )
+
+    runner._warn_players(cfg, state, "chernarus", {}, remaining=60)
+
+    assert recorder.said == []
 
 
 def test_an_instance_without_rcon_is_silently_skipped(
@@ -197,7 +217,7 @@ def test_an_instance_without_rcon_is_silently_skipped(
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: None)
 
     warned: dict[str, datetime] = {}
-    runner._warn_players(plain, "chernarus", warned, remaining=60)
+    runner._warn_players(plain, State(), "chernarus", warned, remaining=60)
 
     assert warned == {}
 
@@ -230,11 +250,11 @@ def test_the_early_tier_repeats_at_five_minutes(
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
     warned = {"chernarus": datetime.now() - timedelta(seconds=299)}
 
-    runner._warn_players(cfg, "chernarus", warned, remaining=1200)
+    runner._warn_players(cfg, State(), "chernarus", warned, remaining=1200)
     assert recorder.said == [], "299s after the last is still inside the 5 minute tier"
 
     warned["chernarus"] = datetime.now() - timedelta(seconds=301)
-    runner._warn_players(cfg, "chernarus", warned, remaining=1200)
+    runner._warn_players(cfg, State(), "chernarus", warned, remaining=1200)
     assert recorder.said == ["Server restart in 20 minutes"]
 
 
@@ -244,7 +264,7 @@ def test_nothing_is_said_outside_both_windows(
     recorder = _Recorder()
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
 
-    runner._warn_players(cfg, "chernarus", {}, remaining=7200)
+    runner._warn_players(cfg, State(), "chernarus", {}, remaining=7200)
 
     assert recorder.said == []
 

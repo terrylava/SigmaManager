@@ -29,6 +29,11 @@ host = "127.0.0.1"
 manage_battleye_config = true
 # Optional override, for a password kept elsewhere. Wins over the generated one.
 password_env = "DZSM_RCON_PASSWORD"
+# How long after a start before RCON is expected to answer. BattlEye binds long after the
+# server is otherwise up — ~43s on a vanilla 1.29 server, and a heavily modded one can
+# take many minutes. Automated attempts inside this window are skipped rather than left
+# to time out; manual ones still try, and explain themselves if they fail.
+startup_grace_seconds = 300
 # Warnings come in two tiers: every 5 minutes from 30 minutes out, then every 4 seconds
 # for the last 5 minutes.
 early_warning_lead_seconds = 1800

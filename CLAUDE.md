@@ -179,8 +179,11 @@ Two BattlEye behaviours to not break:
   password *and* checking whether one exists must both consider the renamed file
   (`battleye_config_candidates`). Miss that and dzsm generates a new password every start,
   silently breaking anything that shares it. There is a test for exactly this.
-- **RCON binds ~43s after start**, long after the mission loads. A refused connection
-  straight after a start is expected, not a fault.
+- **RCON binds ~43s after start on vanilla**, long after the mission loads, and much
+  later on a heavily modded server. `startup_grace_seconds` (300) is how long dzsm assumes
+  it will not answer: automated attempts inside that window are skipped rather than left
+  to time out, while manual `say`/`rcon` still try and explain themselves on failure.
+  Anything calling RCON automatically should check `rcon_grace_remaining` first.
 
 Restart warnings run in two tiers: every 5 minutes from 30 minutes out, then every 4
 seconds for the last 5. The supervise tick shortens to 4s inside the final window — a 15s

@@ -748,20 +748,22 @@ def instance_say(
 ) -> None:
     """Send an admin chat message over RCON."""
     cfg = _load_config(config_path)
+    state = _load_state(cfg)
     if name not in cfg.instances:
         _fail(ValueError(f"unknown instance {name!r}"))
 
     try:
         client = runner.rcon_client(cfg, name)
     except RconError as exc:
-        _fail(exc)
+        # rcon_client connects, so this is where a still-starting server surfaces.
+        _fail(_with_startup_hint(cfg, state, name, exc))
     if client is None:
         _fail(ValueError(f"instance {name!r} has rcon_enabled = false"))
 
     try:
         client.say(message)
     except RconError as exc:
-        _fail(exc)
+        _fail(_with_startup_hint(cfg, state, name, exc))
     finally:
         client.close()
     typer.secho(f"{name}: sent", fg=typer.colors.GREEN)
@@ -775,22 +777,39 @@ def instance_rcon(
 ) -> None:
     """Run a raw RCON command and print the reply."""
     cfg = _load_config(config_path)
+    state = _load_state(cfg)
     if name not in cfg.instances:
         _fail(ValueError(f"unknown instance {name!r}"))
 
     try:
         client = runner.rcon_client(cfg, name)
     except RconError as exc:
-        _fail(exc)
+        # rcon_client connects, so this is where a still-starting server surfaces.
+        _fail(_with_startup_hint(cfg, state, name, exc))
     if client is None:
         _fail(ValueError(f"instance {name!r} has rcon_enabled = false"))
 
     try:
         typer.echo(client.command(command))
     except RconError as exc:
-        _fail(exc)
+        _fail(_with_startup_hint(cfg, state, name, exc))
     finally:
         client.close()
+
+
+def _with_startup_hint(
+    config: Config, state: State, instance_name: str, exc: RconError
+) -> RconError:
+    """Explain an RCON failure that is really just an instance still starting up."""
+    remaining = runner.rcon_grace_remaining(config, state, instance_name)
+    if remaining <= 0:
+        return exc
+    return RconError(
+        f"{exc}\nThis instance started recently — BattlEye usually needs a few minutes "
+        f"on a modded server before RCON answers. Try again in about "
+        f"{remaining:.0f}s, or lower rcon.startup_grace_seconds if that is too "
+        f"conservative for this box."
+    )
 
 
 @instance_app.command("supervise")

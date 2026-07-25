@@ -141,7 +141,7 @@ def test_shutdown_is_requested_over_rcon(cfg: Config, monkeypatch: pytest.Monkey
     client = _Client()
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: client)
 
-    assert runner._request_shutdown(cfg, "chernarus") is True
+    assert runner._request_shutdown(cfg, State(), "chernarus") is True
     assert client.shutdown_called is True
     assert client.closed is True
 
@@ -151,7 +151,7 @@ def test_no_reply_still_counts_as_sent(cfg: Config, monkeypatch: pytest.MonkeyPa
     client = _Client(fail=True)
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: client)
 
-    assert runner._request_shutdown(cfg, "chernarus") is True
+    assert runner._request_shutdown(cfg, State(), "chernarus") is True
 
 
 def test_an_unreachable_rcon_falls_through_to_signalling(
@@ -162,7 +162,7 @@ def test_an_unreachable_rcon_falls_through_to_signalling(
 
     monkeypatch.setattr(runner, "rcon_client", unreachable)
 
-    assert runner._request_shutdown(cfg, "chernarus") is False
+    assert runner._request_shutdown(cfg, State(), "chernarus") is False
 
 
 def test_an_instance_without_rcon_falls_through(
@@ -173,7 +173,7 @@ def test_an_instance_without_rcon_falls_through(
     )
     monkeypatch.setattr(runner, "rcon_client", lambda config, name: None)
 
-    assert runner._request_shutdown(plain, "chernarus") is False
+    assert runner._request_shutdown(plain, State(), "chernarus") is False
 
 
 def test_it_can_be_turned_off(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,7 +182,72 @@ def test_it_can_be_turned_off(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> N
         runner, "rcon_client", lambda config, name: pytest.fail("should not connect")
     )
 
-    assert runner._request_shutdown(disabled, "chernarus") is False
+    assert runner._request_shutdown(disabled, State(), "chernarus") is False
+
+
+# --- the startup grace window ------------------------------------------------
+
+
+def _running(state: State, *, started_ago_seconds: float) -> State:
+    state.processes["chernarus"] = ProcessInfo(
+        pid=1,
+        port=2302,
+        started_at=datetime.now().astimezone() - timedelta(seconds=started_ago_seconds),
+        create_time=None,
+    )
+    return state
+
+
+def test_no_grace_for_an_instance_dzsm_did_not_start(cfg: Config) -> None:
+    """Nothing to measure from, so do not block an attempt on a guess."""
+    assert runner.rcon_grace_remaining(cfg, State(), "chernarus") == 0
+
+
+def test_grace_remaining_counts_down(cfg: Config) -> None:
+    state = _running(State(), started_ago_seconds=60)
+
+    remaining = runner.rcon_grace_remaining(cfg, state, "chernarus")
+
+    assert 235 < remaining < 245, "300s default, 60s elapsed"
+
+
+def test_grace_expires(cfg: Config) -> None:
+    state = _running(State(), started_ago_seconds=600)
+
+    assert runner.rcon_grace_remaining(cfg, state, "chernarus") == 0
+
+
+def test_shutdown_skips_rcon_during_the_grace_window(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BattlEye has not bound the port yet, so waiting out a socket timeout on every
+    quick stop is pure delay."""
+    state = _running(State(), started_ago_seconds=5)
+    monkeypatch.setattr(
+        runner, "rcon_client", lambda config, name: pytest.fail("should not connect")
+    )
+
+    assert runner._request_shutdown(cfg, state, "chernarus") is False
+
+
+def test_shutdown_uses_rcon_once_the_window_has_passed(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _running(State(), started_ago_seconds=600)
+    client = _Client()
+    monkeypatch.setattr(runner, "rcon_client", lambda config, name: client)
+
+    assert runner._request_shutdown(cfg, state, "chernarus") is True
+    assert client.shutdown_called is True
+
+
+def test_a_shorter_grace_can_be_configured(cfg: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    quick = cfg.model_copy(update={"rcon": RconConfig(startup_grace_seconds=10)})
+    state = _running(State(), started_ago_seconds=30)
+    client = _Client()
+    monkeypatch.setattr(runner, "rcon_client", lambda config, name: client)
+
+    assert runner._request_shutdown(quick, state, "chernarus") is True
 
 
 class _Process:

@@ -437,9 +437,22 @@ Two behaviours of BattlEye's own make this fiddlier than it looks:
   would mint a new one on every start and silently rotate the password out from under any
   admin tooling sharing it. On a clean shutdown BattlEye renames it back.
 - **RCON binds well after the server is otherwise up** — measured at ~43 seconds on a
-  1.29 server, long after the mission has loaded. A connection refused immediately after
-  a start is expected, not a fault. It does not affect restart warnings, which run 30
-  minutes into an instance's life at the earliest.
+  *vanilla* 1.29 server, long after the mission has loaded, and a heavily modded server
+  can take many minutes. A connection refused immediately after a start is expected, not
+  a fault.
+
+`startup_grace_seconds` (default 300) is how long after a start RCON is assumed not to
+answer yet. Inside that window:
+
+- **Automated attempts are skipped**, not left to time out. Without this, stopping a
+  freshly started instance burned a socket timeout before falling through to signalling
+  it; now it skips straight there and stops in about a second.
+- **Manual `say`/`rcon` still try** — the window is a conservative default, not a fact
+  about a particular box — but a failure explains itself and points at the setting rather
+  than looking like a broken client.
+
+It also guards restart warnings, which a short `restart_after_hours` or a crash-restart
+loop could otherwise push into a window where nothing can answer.
 
 To rotate a password, delete `RConPassword` from the config (or the file itself) and
 restart; a fresh one is generated.

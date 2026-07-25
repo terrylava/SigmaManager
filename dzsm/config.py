@@ -106,7 +106,13 @@ class RconConfig(BaseModel):
     # Name of the env var holding the RCON password. Like every other credential here,
     # the password itself is never in config.
     password_env: str = "DZSM_RCON_PASSWORD"  # noqa: S105 — a var name, not a secret
+    # How long to wait for a single RCON exchange once connected.
     timeout_seconds: float = 5.0
+    # How long after an instance starts before RCON is expected to answer. BattlEye binds
+    # long after the server is otherwise up — ~43s on a vanilla 1.29 server, and a heavily
+    # modded one can take many minutes. Automated attempts inside this window are skipped
+    # rather than left to time out; manual ones still try, and say so if they fail.
+    startup_grace_seconds: int = 300
     # Warnings come in two tiers. From `early_warning_lead_seconds` before a restart they
     # repeat every `early_warning_interval_seconds`; inside `final_warning_lead_seconds`
     # they switch to `final_warning_interval_seconds`. Defaults: every 5 minutes from 30
