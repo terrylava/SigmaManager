@@ -7,12 +7,14 @@ attach a real terminal, which a test harness cannot meaningfully provide.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from dzsm import cli
+from dzsm import steam as steam_module
 from dzsm.config import Config, SteamConfig
 from dzsm.steam import SteamError, SteamGuardRequired, _login_args
 
@@ -117,6 +119,58 @@ def test_interactive_flag_uses_the_interactive_path(
     result = runner.invoke(cli.app, ["login", "--interactive", "--config", str(config_file)])
     assert result.exit_code == 0
     assert called == ["someone"]
+
+
+# --- the exit-7 self-update case ---------------------------------------------
+
+
+class _Completed:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+def _steamcmd_exiting(monkeypatch: pytest.MonkeyPatch, code: int, tmp_path: Path) -> SteamConfig:
+    steam = SteamConfig(username="someone", steamcmd_path=tmp_path / "steamcmd.exe")
+    steam.steamcmd_path.write_bytes(b"MZ")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Completed(code))
+    return steam
+
+
+def test_interactive_login_verifies_rather_than_trusting_exit_seven(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exit 7 means steamcmd replaced itself. Nothing was captured from that run, so the
+    outcome is proven with a non-interactive login instead of assumed either way."""
+    steam = _steamcmd_exiting(monkeypatch, 7, tmp_path)
+    verified: list[str] = []
+    monkeypatch.setattr(steam_module, "login", lambda s, **k: verified.append(s.username))
+
+    steam_module.login_interactive(steam)
+
+    assert verified == ["someone"]
+
+
+def test_interactive_login_reports_failure_when_exit_seven_did_not_take(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If the follow-up login fails, exit 7 really was a failure — surface it."""
+    steam = _steamcmd_exiting(monkeypatch, 7, tmp_path)
+
+    def broken(s: SteamConfig, **kwargs: object) -> None:
+        raise SteamError("Login Failure: Invalid Password")
+
+    monkeypatch.setattr(steam_module, "login", broken)
+
+    with pytest.raises(SteamError, match="Invalid Password"):
+        steam_module.login_interactive(steam)
+
+
+def test_interactive_login_still_rejects_other_nonzero_exits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    steam = _steamcmd_exiting(monkeypatch, 5, tmp_path)
+    with pytest.raises(SteamError, match="exited 5"):
+        steam_module.login_interactive(steam)
 
 
 def test_login_fails_clearly_on_a_missing_config(tmp_path: Path) -> None:

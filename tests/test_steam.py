@@ -171,6 +171,12 @@ def test_verify_rejects_nonzero_exit(config: Config, downloaded_mod: Path) -> No
         verify_download(config, _result(config, returncode=3))
 
 
+def test_verify_accepts_the_self_update_exit_code(config: Config, downloaded_mod: Path) -> None:
+    """steamcmd exits 7 after replacing its own binary — every fresh install does this on
+    its first run, and the session itself completed fine."""
+    verify_download(config, _result(config, returncode=7))
+
+
 @pytest.mark.parametrize(
     "marker",
     ["Timeout downloading item", "Rate Limit Exceeded", "ERROR! Download item", "No subscription"],

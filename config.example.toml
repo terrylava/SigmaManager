@@ -18,7 +18,11 @@ username = "your_steam_account"
 # The password is read from this environment variable, never from this file.
 # Seed Steam Guard once interactively; steamcmd caches a sentry afterward.
 password_env = "DZSM_STEAM_PASSWORD"
+# steamcmd is downloaded from Valve automatically if it isn't here already.
 steamcmd_path = 'D:\dz\steamcmd\steamcmd.exe'
+# Set false to refuse to fetch an executable at runtime; dzsm then fails with
+# instructions instead of installing it.
+# auto_install = true
 
 # ---------------------------------------------------------------------------
 # Mods. The table key is the name instances refer to.

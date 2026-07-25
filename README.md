@@ -37,6 +37,10 @@ verified against live Steam, the download path only against fakes.
 
 ## First run
 
+steamcmd installs itself. The first command that needs it downloads Valve's archive to
+`<root>/steamcmd/` and extracts it; set `auto_install = false` under `[steam]` to refuse
+that and get instructions instead.
+
 Seed Steam Guard once. steamcmd caches a sentry afterward, and every later dzsm command
 runs non-interactively:
 

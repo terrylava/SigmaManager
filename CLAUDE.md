@@ -39,6 +39,11 @@ path in `-mod=`.
   spaces, and drive letters are safe.
 - **Do not sort or derive mod load order.** It is the order in `InstanceConfig.mods`,
   which is the semicolon order in `-mod=`. Framework mods load before dependents.
+- **steamcmd exit 7 is not a failure.** It means steamcmd replaced its own binary and
+  restarted, which every fresh install does on its first run — the session itself
+  usually completed. `STEAMCMD_SELF_UPDATE_EXIT` handles it. `login_interactive` can't
+  inspect that run (nothing is captured), so on 7 it proves the outcome by doing a
+  non-interactive login, which can only succeed from cached credentials.
 - **Do not trust steamcmd's exit code.** It exits 0 on failed downloads. This is almost
   certainly what killed om.py. Verify explicitly after every invocation: folder exists,
   folder non-empty, `.acf` manifest timestamp advanced, stdout free of known error
@@ -94,6 +99,11 @@ Runtime layout (under `root`, not the repo): `steamcmd/`, `serverapp/<version>/`
 Steam Web API `time_updated` lookup → steamcmd download → four-part verification →
 promotion to an immutable version directory → state save. `dzsm login` verifies
 credentials, and `dzsm login --interactive` seeds Steam Guard.
+
+`steam.ensure_steamcmd()` downloads and extracts Valve's steamcmd when it is missing, so
+no manual install step exists. It runs from `_run_steamcmd` and `login_interactive`, is
+idempotent, and guards extraction against archive members that escape the target
+directory — it writes an executable, so the archive is treated as untrusted input.
 
 Also done: config models + validation, state models + atomic I/O,
 `is_reparse_point`/`safe_rmtree`, launch-arg construction, `mods list`.

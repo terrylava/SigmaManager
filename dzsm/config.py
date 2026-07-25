@@ -62,6 +62,10 @@ class SteamConfig(BaseModel):
     # Name of the env var holding the password. The password itself is never in config.
     password_env: str = "DZSM_STEAM_PASSWORD"  # noqa: S105 — a var name, not a secret
     steamcmd_path: Path
+    # Download steamcmd from Valve when it isn't at steamcmd_path. Set false on a locked
+    # down box where fetching an executable at runtime is not acceptable; dzsm then
+    # fails with instructions instead.
+    auto_install: bool = True
 
     def password(self) -> str | None:
         """Read the password from the environment. None if unset."""
