@@ -5,10 +5,8 @@
 # `C:\Users\you\Documents\DayZ Server Manager`. Config load validates this and fails.
 root = 'D:\dz'
 
-# Version directories are retained this long after their refcount hits 0. The window is
-# also the rollback window (spec §8).
-gc_retention_days = 7
-
+# Note: old versions are never deleted automatically. `dzsm mods versions` lists what is
+# cached and what is unused; `dzsm mods delete <mod> <version>` removes one explicitly.
 # "copy" is the only trusted strategy. "hardlink" is an untested optimization (spec §12)
 # that silently corrupts old versions if steamcmd writes files in place.
 snapshot_strategy = "copy"

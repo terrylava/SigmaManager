@@ -115,8 +115,14 @@ cleanly.
 Also done: config models + validation, state models + atomic I/O,
 `is_reparse_point`/`safe_rmtree`, launch-arg construction, `mods list`, refcounting.
 
-Still stubbed: `mods.collect_garbage` (so `dzsm mods gc` raises),
-`steam.update_server_app`, `api.py`.
+**Versions are never deleted automatically** (spec §8, revised 2026-07-25 — the original
+time-based GC was dropped). `dzsm mods versions` reports; `dzsm mods delete <mod>
+<version>` removes one explicitly. Deletion refuses a version an instance is pinned to
+(`--force` overrides, and clears the pin), and *never* one a running instance is pinned
+to — the server holds OS-level locks on those files, `--force` included. Do not
+reintroduce a retention timer.
+
+Still stubbed: `steam.update_server_app`, `api.py`.
 
 **`server_app_path` is interim.** Because `update_server_app` is a stub, dzsm cannot
 download appid 223350, so instances run against a Steam-installed server pointed at by

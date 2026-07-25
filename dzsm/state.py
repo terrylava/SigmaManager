@@ -70,6 +70,15 @@ class State(BaseModel):
             size_bytes=size_bytes,
         )
 
+    def remove_version(self, workshop_id: int, version: int) -> None:
+        """Forget a version. Called only from an explicit delete — nothing expires."""
+        versions = self.versions.get(workshop_id)
+        if versions is None:
+            return
+        versions.pop(version, None)
+        if not versions:
+            del self.versions[workshop_id]
+
     def known_versions(self, workshop_id: int) -> list[int]:
         """Versions on disk for a mod, newest first. Empty list if none — never False."""
         return sorted(self.versions.get(workshop_id, {}), reverse=True)

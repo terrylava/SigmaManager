@@ -92,7 +92,8 @@ class Config(BaseModel):
     steam: SteamConfig
     mods: dict[str, Mod] = Field(default_factory=dict)
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
-    gc_retention_days: int = 7
+    # No retention window: versions are never deleted automatically. The cache is the
+    # rollback path, so a version stays until someone runs `dzsm mods delete`.
     # "hardlink" is the untested optimization in spec §12. It corrupts old version
     # directories if steamcmd writes files in place. Do not default it on.
     snapshot_strategy: Literal["copy", "hardlink"] = "copy"

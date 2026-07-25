@@ -294,14 +294,35 @@ with slightly stale mods beats a server that is down.
 
 ---
 
-## 8. Garbage collection
+## 8. Version retention
+
+> **Revised 2026-07-25.** This section originally specified time-based garbage
+> collection: delete a version once its refcount is 0 and it is older than N days.
+> That was dropped. **Nothing is ever deleted automatically.** A retention timer
+> eventually eats a version somebody still wanted, and it does so unattended, on a box
+> where the whole point of the design is that old versions stay reachable.
 
 `state.json` tracks which instance is pinned to which version.
 
-- A version directory may be deleted only when its refcount is 0 **and** it is older
-  than N days (configurable, default 7).
-- The retention window gives free rollback: revert an instance to the previous
-  version by changing one entry in state.
+- Versions accumulate until a human deletes one. Disk is cheap; an unavailable rollback
+  during an incident is not.
+- `dzsm mods versions` reports every cached version with its size, age, whether it is the
+  latest, which instances are pinned to it, and whether it is still on disk. It reclaims
+  nothing.
+- `dzsm mods delete <mod> <version>` removes exactly one version, and only because it was
+  asked to.
+
+Deletion refuses in two cases:
+
+1. **An instance is pinned to it.** That instance would fail to start, or lose a mod, at
+   its next restart. `--force` overrides this for a stale pin, and clears the pin so
+   state stops claiming a version that no longer exists.
+2. **A pinned instance is currently running.** Never overridable, `--force` included. A
+   running DayZ server holds OS-level locks on its mod files — the constraint this entire
+   design is built around. Stop the instance first.
+
+Rollback stays what it always was: point an instance at an older version directory. That
+now works indefinitely rather than for N days.
 
 ---
 

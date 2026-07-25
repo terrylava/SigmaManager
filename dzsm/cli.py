@@ -15,7 +15,7 @@ import typer
 from dzsm import runner
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
-from dzsm.mods import ModCacheError, promote_snapshot
+from dzsm.mods import ModCacheError, delete_version, promote_snapshot, version_status
 from dzsm.runner import RunnerError
 from dzsm.state import State, StateError, load_state, save_state
 from dzsm.steam import (
@@ -235,16 +235,91 @@ def mods_list(config_path: ConfigPath = Path("config.toml")) -> None:
             typer.echo(f"{name:<24} {mod.workshop_id:<12} {version} {marker}")
 
 
-@mods_app.command("gc")
-def mods_gc(
+@mods_app.command("versions")
+def mods_versions(
     config_path: ConfigPath = Path("config.toml"),
-    apply: Annotated[
+    unused_only: Annotated[
         bool,
-        typer.Option("--apply", help="Actually delete. Default is a dry run."),
+        typer.Option("--unused", help="Show only versions no instance is pinned to."),
     ] = False,
 ) -> None:
-    """Delete unreferenced version directories past the retention window."""
-    raise NotImplementedError("mods.collect_garbage")
+    """List every cached version, its size, age, and what is pinned to it.
+
+    Reporting only. Nothing is ever deleted automatically — use `mods delete`.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    statuses = version_status(cfg, state)
+    if unused_only:
+        statuses = [s for s in statuses if not s.in_use]
+
+    if not statuses:
+        typer.echo("no cached versions")
+        return
+
+    reclaimable = 0
+    for status in statuses:
+        name = status.mod_name or f"(unconfigured {status.workshop_id})"
+        age = f"{status.age_days:.1f}d" if status.age_days is not None else "?"
+        size = f"{status.size_bytes / (1024 * 1024):.1f} MiB"
+        if status.in_use:
+            tag = typer.style(f"in use by {', '.join(status.pinned_by)}", fg=typer.colors.GREEN)
+        else:
+            tag = typer.style("unused", fg=typer.colors.YELLOW)
+            reclaimable += status.size_bytes
+        latest = " latest" if status.is_latest else ""
+        missing = "" if status.exists else typer.style("  MISSING ON DISK", fg=typer.colors.RED)
+        typer.echo(
+            f"{name:<20} {status.version:<12} {size:>10}  {age:>7}{latest:<7} {tag}{missing}"
+        )
+
+    if reclaimable:
+        megabytes = reclaimable / (1024 * 1024)
+        typer.echo("")
+        typer.echo(f"{megabytes:.1f} MiB in unused versions (kept until deleted)")
+
+
+@mods_app.command("delete")
+def mods_delete(
+    mod: Annotated[str, typer.Argument(help="Mod name from config, or a workshop id.")],
+    version: Annotated[int, typer.Argument(help="Version (time_updated) to delete.")],
+    config_path: ConfigPath = Path("config.toml"),
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Delete even if an instance is pinned to it."),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation.")] = False,
+) -> None:
+    """Delete one cached version. Nothing is removed unless you run this."""
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+
+    configured = cfg.mods.get(mod)
+    if isinstance(configured, WorkshopMod):
+        workshop_id = configured.workshop_id
+    elif mod.isdigit():
+        workshop_id = int(mod)
+    else:
+        _fail(ValueError(f"{mod!r} is not a configured workshop mod or a workshop id"))
+
+    path = cfg.version_dir(workshop_id, version)
+    if not yes:
+        typer.echo(f"About to delete {path}")
+        if not typer.confirm("Delete it?"):
+            typer.echo("aborted")
+            raise typer.Exit(1)
+
+    running = [name for name in cfg.instances if runner.is_running(cfg, state, name)]
+    try:
+        deleted = delete_version(
+            cfg, state, workshop_id, version, running_instances=running, force=force
+        )
+    except ModCacheError as exc:
+        _fail(exc)
+    finally:
+        _save_state(cfg, state)
+
+    typer.secho(f"deleted {deleted}", fg=typer.colors.GREEN)
 
 
 @instance_app.command("start")

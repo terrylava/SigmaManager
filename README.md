@@ -29,10 +29,10 @@ verified against live Steam, the download path only against fakes.
 | `config.py` | Done |
 | `state.py` | Done |
 | `steam.py` | Web API + download + verification done; `update_server_app` stubbed |
-| `mods.py` | Promotion, resolution, refcounts done; GC stubbed |
+| `mods.py` | Done |
 | `instance.py` | Done |
 | `runner.py` | Done |
-| `cli.py` | Everything except `mods gc` |
+| `cli.py` | Done |
 | `api.py` | Deferred (spec §11) |
 
 ## First run

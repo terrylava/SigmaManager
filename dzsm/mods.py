@@ -9,6 +9,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from collections.abc import Collection
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dzsm.config import Config, WorkshopMod
@@ -143,17 +146,150 @@ def _tree_size(path: Path) -> int:
     return total
 
 
-def collect_garbage(config: Config, state: State, *, dry_run: bool = True) -> list[Path]:
-    """Delete version directories that are unreferenced AND older than the retention
-    window (config.gc_retention_days).
+@dataclass(frozen=True)
+class VersionStatus:
+    """One cached version and everything needed to decide whether to keep it."""
 
-    Both conditions are required. The retention window is what makes rollback possible:
-    reverting an instance to its previous version is a state edit, not a re-download.
+    mod_name: str | None
+    workshop_id: int
+    version: int
+    path: Path
+    exists: bool
+    size_bytes: int
+    downloaded_at: datetime | None
+    pinned_by: list[str]
+    is_latest: bool
 
-    Returns the list of directories deleted (or that would be deleted, when dry_run).
-    Empty list when there is nothing to collect.
+    @property
+    def in_use(self) -> bool:
+        return bool(self.pinned_by)
+
+    @property
+    def age_days(self) -> float | None:
+        if self.downloaded_at is None:
+            return None
+        return (datetime.now(UTC) - self.downloaded_at).total_seconds() / 86400
+
+
+def version_status(config: Config, state: State) -> list[VersionStatus]:
+    """Every cached version, newest first per mod, with what references it.
+
+    Reporting only — nothing is deleted here, and nothing anywhere deletes a version
+    without being explicitly told to. Old versions are kept until someone asks for them
+    to go, because the cache is also the rollback path: reverting an instance to its
+    previous version is a state edit, not a re-download.
+
+    Returns a list, empty when nothing is cached. Never None (Rule 1).
     """
-    raise NotImplementedError("spec §8")
+    names = {
+        mod.workshop_id: name
+        for name, mod in config.mods.items()
+        if isinstance(mod, WorkshopMod)
+    }
+
+    statuses: list[VersionStatus] = []
+    for workshop_id, versions in state.versions.items():
+        latest = max(versions, default=None)
+        for version, record in versions.items():
+            path = config.version_dir(workshop_id, version)
+            mod_name = names.get(workshop_id)
+            pinned_by = sorted(
+                instance
+                for instance, pins in state.pins.items()
+                if mod_name is not None and pins.get(mod_name) == version
+            )
+            statuses.append(
+                VersionStatus(
+                    mod_name=mod_name,
+                    workshop_id=workshop_id,
+                    version=version,
+                    path=path,
+                    exists=path.is_dir(),
+                    size_bytes=record.size_bytes,
+                    downloaded_at=record.downloaded_at,
+                    pinned_by=pinned_by,
+                    is_latest=version == latest,
+                )
+            )
+
+    statuses.sort(key=lambda s: (s.mod_name or str(s.workshop_id), -s.version))
+    return statuses
+
+
+def delete_version(
+    config: Config,
+    state: State,
+    workshop_id: int,
+    version: int,
+    *,
+    running_instances: Collection[str] = (),
+    force: bool = False,
+) -> Path:
+    """Delete one cached version. Only ever called because a human asked for it.
+
+    Refuses when an instance is pinned to it, because that instance would fail to start
+    or silently lose a mod at its next restart. `force` overrides that for a stale pin,
+    but never for a *running* instance: the server holds OS-level locks on those files,
+    which is the constraint this entire design is built around.
+
+    Returns the deleted path. Raises ModCacheError rather than reporting failure by
+    return value (Rule 1).
+    """
+    path = config.version_dir(workshop_id, version)
+    pinned_by = [
+        instance
+        for instance, pins in state.pins.items()
+        for mod_name, pinned in pins.items()
+        if pinned == version and _workshop_id_of(config, mod_name) == workshop_id
+    ]
+
+    running_pins = sorted(set(pinned_by) & set(running_instances))
+    if running_pins:
+        raise ModCacheError(
+            f"refusing to delete mod {workshop_id} version {version}: it is in use by "
+            f"running instance(s) {', '.join(running_pins)}. A running DayZ server holds "
+            f"OS-level locks on its mod files — stop the instance first."
+        )
+
+    if pinned_by and not force:
+        raise ModCacheError(
+            f"refusing to delete mod {workshop_id} version {version}: instance(s) "
+            f"{', '.join(sorted(pinned_by))} are pinned to it. Repoint them first, or "
+            f"pass force to delete anyway."
+        )
+
+    if path.exists():
+        safe_rmtree(path)
+        _log.info("mods: deleted mod %s version %s at %s", workshop_id, version, path)
+    else:
+        _log.warning(
+            "mods: mod %s version %s was recorded but not on disk at %s; "
+            "clearing the record",
+            workshop_id,
+            version,
+            path,
+        )
+
+    state.remove_version(workshop_id, version)
+
+    # Drop any now-dangling pins so state does not keep claiming a version that is gone.
+    for instance, pins in state.pins.items():
+        for mod_name, pinned in list(pins.items()):
+            if pinned == version and _workshop_id_of(config, mod_name) == workshop_id:
+                del pins[mod_name]
+                _log.warning(
+                    "mods: cleared pin %s -> %s for instance %s (version deleted)",
+                    mod_name,
+                    version,
+                    instance,
+                )
+
+    return path
+
+
+def _workshop_id_of(config: Config, mod_name: str) -> int | None:
+    mod = config.mods.get(mod_name)
+    return mod.workshop_id if isinstance(mod, WorkshopMod) else None
 
 
 def resolve_mod_versions(config: Config, state: State, instance_name: str) -> dict[str, int]:
