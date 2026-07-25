@@ -126,15 +126,21 @@ Two details worth knowing before touching this code:
 
 ### Unverified assumptions — these gate real work (spec §5)
 
-| # | Assumption | Confidence |
+| # | Assumption | Status |
 |---|---|---|
-| 1 | `-mod=` accepts absolute paths including drive letters | ~85% |
-| 2 | `.bikey` files must be copied into the instance's `keys/` when the mod lives outside the server dir | ~65% |
-| 3 | Native Linux DayZ server is viable on stable branch (sources conflict; may be experimental-only) | ~45% |
+| 1 | `-mod=` accepts absolute paths including drive letters | **CONFIRMED 2026-07-25** |
+| 2 | `.bikey` files must be copied into the instance's `keys/` when the mod lives outside the server dir | ~65%, open |
+| 3 | Native Linux DayZ server is viable on stable branch (sources conflict; may be experimental-only) | ~45%, open |
 
-#1 gates `instance.py`. If it fails, fall back to per-instance copies — but keep version
-directories regardless. `config.py`, `state.py`, `steam.py`, and `mods.py` do not depend
-on any of these.
+**#1 is settled.** DayZ 1.29 server on `G:` loaded a CF version directory on `D:` with
+`verifySignatures = 2` — PBOs mounted from the absolute path and CF's script defines
+(`JM_CommunityFramework`, `CF_MODULE_CONFIG`, …) appeared, so it compiled and ran. No
+signature errors. The per-instance-copy fallback is not needed; `instance.py` is
+unblocked, and `build_launch_args` is validated in shape.
+
+#2 is *not* settled by that test: a server loads its own mods without keys, and `keys/`
+governs whether a connecting **client's** mods are accepted. Answering it needs a client
+connection, not a server boot.
 
 ### Build order (spec §11)
 

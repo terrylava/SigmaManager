@@ -40,9 +40,9 @@ def build_launch_args(
     verbatim is what makes backslashes, spaces, and drive letters safe without quoting
     gymnastics.
 
-    NOTE: absolute paths in -mod= is verification item #1 in spec §5 (~85% confidence)
-    and is unconfirmed on a real box. If it fails, the fallback is per-instance mod
-    copies — the version directories stay regardless.
+    Absolute paths in -mod= are CONFIRMED (spec §5 item 1, verified 2026-07-25 against
+    DayZ 1.29 with verifySignatures = 2, server and mods on different drives). No
+    per-instance copying is needed.
     """
     instance_root = config.instance_dir(instance_name)
     return [

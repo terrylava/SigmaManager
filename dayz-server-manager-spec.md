@@ -161,7 +161,7 @@ These are load-bearing assumptions that are not fully confirmed. Test them first
 
 | # | Assumption | Confidence | How to test |
 |---|-----------|-----------|-------------|
-| 1 | `-mod=` accepts absolute paths incl. drive letters | ~85% | Launch one instance with an absolute modcache path; check RPT for mod load lines and no signature errors |
+| 1 | `-mod=` accepts absolute paths incl. drive letters | **CONFIRMED 2026-07-25** | Launch one instance with an absolute modcache path; check RPT for mod load lines and no signature errors |
 | 2 | `.bikey` files must be copied into the instance's `keys/` dir when the mod lives outside the server dir | ~65% | Run with `verifySignatures=2` and a mod outside the server dir; see if a client can connect |
 | 3 | Native Linux DayZ server viability on stable branch | ~45% | Sources conflict. Bohemia's wiki documents `./DayZServer` for Linux, but other sources say the native Linux build is experimental-branch only and stable requires Wine/Proton. Confirm before committing to a Linux code path |
 
@@ -173,6 +173,29 @@ Check the RPT log for mod load lines and signature errors.
 
 If #1 fails, fall back to per-instance copies (om.py's approach) — but keep the
 version directories regardless.
+
+### Test #1 result — CONFIRMED, 2026-07-25
+
+Ran the DayZ 1.29 server (installed on `G:`) against a CF version directory on `D:`,
+with `verifySignatures = 2`:
+
+```
+FileSystem: Adding package 'D:\sigmamanagertest\modcache\1559212036\1771519119\addons\legacy.pbo' to RV filesystem
+FileSystem: Adding package 'D:\sigmamanagertest\modcache\1559212036\1771519119\addons\scripts.pbo' to RV filesystem
+FileSystem: Adding package 'D:\sigmamanagertest\modcache\1559212036\1771519119\addons\gui.pbo' to RV filesystem
+```
+
+The script module defines then listed `JM_CommunityFramework`, `CF_MODULE_CONFIG`,
+`CF_EXPRESSION`, `CF_MODSTORAGE`, `CF_SURFACES` and the rest of CF's defines, so the mod
+did not merely mount — its Enforce Script compiled and loaded. Startup proceeded into
+world and entity creation with no signature or `.bikey` errors.
+
+Absolute paths work, including across drives. **The fallback to per-instance copies is
+not needed.** Activation stays "write a different path into `-mod=` at next restart."
+
+Note this does *not* settle #2. The server loads its own mods without needing keys; the
+`keys/` directory governs whether a connecting *client's* mods are accepted, and no
+client was involved in this test.
 
 ---
 
