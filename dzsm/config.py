@@ -121,6 +121,11 @@ class RconConfig(BaseModel):
     # closes down on its own terms and flushes persistence. Falls back to terminate then
     # kill if it does not exit.
     shutdown_via_rcon: bool = True
+    # Write a BattlEye server config with a generated RCON password when an instance has
+    # none. BattlEye ships no default config, so without this RCON never listens at all.
+    # The password is generated with `secrets` and read back from that file; it has to be
+    # plaintext because BattlEye has no other way to be told it.
+    manage_battleye_config: bool = True
 
     def password(self, override_env: str | None = None) -> str | None:
         return os.environ.get(override_env or self.password_env) or None

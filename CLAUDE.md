@@ -166,9 +166,21 @@ acknowledged or BattlEye retransmits them, and they interleave with command repl
 the client acks and keeps waiting rather than treating one as the answer.
 
 RCON is **on by default** on `port + 3` (a 2302 server → 2305, the stock DayZ layout).
-`rcon_port` overrides, `rcon_enabled = false` opts out. Because it is on by default, the
-"password not set" error is the first thing many users will hit — it names the variable
-and the way to turn RCON off.
+`rcon_port` overrides, `rcon_enabled = false` opts out.
+
+**BattlEye ships no config**, so dzsm writes one before launch with a `secrets`-generated
+password, and reads it back from there — no env var needed, though one still overrides.
+There is deliberately no default password; a shared one is worse than none.
+
+Two BattlEye behaviours to not break:
+
+- **It consumes the config on startup**, renaming `BEServer_x64.cfg` →
+  `BEServer_x64_active_<hex>.cfg`, and renames it back on clean shutdown. Reading the
+  password *and* checking whether one exists must both consider the renamed file
+  (`battleye_config_candidates`). Miss that and dzsm generates a new password every start,
+  silently breaking anything that shares it. There is a test for exactly this.
+- **RCON binds ~43s after start**, long after the mission loads. A refused connection
+  straight after a start is expected, not a fault.
 
 Restart warnings run in two tiers: every 5 minutes from 30 minutes out, then every 4
 seconds for the last 5. The supervise tick shortens to 4s inside the final window — a 15s

@@ -23,8 +23,11 @@ per_instance_missions = true
 # BattlEye RCON, used for restart warnings and admin chat. On by default for every
 # instance, on port + 3; set rcon_enabled = false on an instance to opt out.
 host = "127.0.0.1"
-# The password is read from this env var, never from config. It must match RConPassword
-# in the server's BEServer config (under <profiles>/BattlEye/).
+# dzsm writes a BattlEye config with a generated password before each launch and reads it
+# back from there, so nothing needs exporting. BattlEye ships no config of its own, and
+# without one RCON never listens at all. Set false to manage it yourself.
+manage_battleye_config = true
+# Optional override, for a password kept elsewhere. Wins over the generated one.
 password_env = "DZSM_RCON_PASSWORD"
 # Warnings come in two tiers: every 5 minutes from 30 minutes out, then every 4 seconds
 # for the last 5 minutes.

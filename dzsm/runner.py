@@ -22,10 +22,14 @@ import psutil
 
 from dzsm.config import Config, InstanceConfig
 from dzsm.instance import (
+    battleye_config_path,
     build_launch_args,
+    ensure_battleye_config,
     ensure_layout,
     prepare_mission,
     prepare_server_directory,
+    read_battleye_password,
+    read_battleye_port,
     server_executable,
     sync_keys,
 )
@@ -67,6 +71,11 @@ def start(
     exe = server_executable(server_dir)
     ensure_layout(config, server_dir, instance_name)
     mission = prepare_mission(config, server_dir, instance_name)
+    # Before launch: BattlEye reads this at startup, so a password generated afterwards
+    # would not take effect until the restart after next.
+    rcon_port = instance.resolved_rcon_port()
+    if rcon_port is not None:
+        ensure_battleye_config(config, instance_name, rcon_port)
 
     versions = _versions_to_activate(config, state, instance_name)
     try:
@@ -211,16 +220,32 @@ def rcon_client(config: Config, instance_name: str) -> RconClient | None:
     cannot connect *does* raise, because that is a broken setup worth hearing about.
     """
     instance = config.instances[instance_name]
-    port = instance.resolved_rcon_port()
+    if not instance.rcon_enabled:
+        return None
+
+    # BattlEye's own config is the authority for both: it is what the server actually
+    # read. An explicit setting in dzsm's config overrides, and the derived port is the
+    # last resort.
+    port = (
+        instance.rcon_port
+        or read_battleye_port(config, instance_name)
+        or instance.resolved_rcon_port()
+    )
     if port is None:
         return None
 
-    password = config.rcon.password(instance.rcon_password_env)
+    # The environment wins when set, so a password kept elsewhere still works.
+    password = config.rcon.password(instance.rcon_password_env) or read_battleye_password(
+        config, instance_name
+    )
     if not password:
         env = instance.rcon_password_env or config.rcon.password_env
         raise RconError(
-            f"instance {instance_name!r}: RCON is enabled (port {port}) but {env} is "
-            f"unset or empty. Set it, or turn RCON off with rcon_enabled = false."
+            f"instance {instance_name!r}: RCON is enabled (port {port}) but no password "
+            f"is available — nothing under "
+            f"{battleye_config_path(config, instance_name).parent} has an RConPassword "
+            f"and {env} is unset. Start the instance once to have one generated, or turn "
+            f"RCON off with rcon_enabled = false."
         )
 
     client = RconClient(

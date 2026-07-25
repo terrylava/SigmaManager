@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -337,6 +338,140 @@ def prepare_mission(config: Config, server_dir: Path, instance_name: str) -> str
 
     write_template(config.instance_dir(instance_name) / instance.config_file, mission)
     return mission
+
+
+def battleye_config_path(config: Config, instance_name: str) -> Path:
+    """Where BattlEye reads its server settings for this instance.
+
+    BattlEye puts its files under <profiles>/BattlEye/, and -profiles is per instance, so
+    each instance has its own RCON password and port.
+    """
+    return config.instance_dir(instance_name) / "profiles" / "BattlEye" / "BEServer_x64.cfg"
+
+
+def battleye_config_candidates(config: Config, instance_name: str) -> list[Path]:
+    """Every file that might hold this instance's RCON settings, best first.
+
+    **BattlEye consumes its config on startup**: it reads BEServer_x64.cfg and renames it
+    to BEServer_x64_active_<pid>.cfg, so the file is gone by the time the server is up.
+    Anything reading the password afterwards has to look at the renamed one, and anything
+    deciding whether a password already exists has to as well — otherwise it would mint a
+    new one on every single start and silently rotate the password out from under any
+    admin tooling sharing it.
+    """
+    path = battleye_config_path(config, instance_name)
+    candidates = [path] if path.is_file() else []
+    if path.parent.is_dir():
+        active = sorted(
+            path.parent.glob("BEServer_x64_active_*.cfg"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        candidates.extend(active)
+    return candidates
+
+
+def read_battleye_password(config: Config, instance_name: str) -> str | None:
+    """This instance's RCON password, from whichever config still has it."""
+    for candidate in battleye_config_candidates(config, instance_name):
+        password = read_battleye_setting(candidate, "RConPassword")
+        if password:
+            return password
+    return None
+
+
+def read_battleye_port(config: Config, instance_name: str) -> int | None:
+    """This instance's configured RCON port, from whichever config still has it."""
+    for candidate in battleye_config_candidates(config, instance_name):
+        value = read_battleye_setting(candidate, "RConPort")
+        if value and value.isdigit():
+            return int(value)
+    return None
+
+
+def read_battleye_setting(path: Path, key: str) -> str | None:
+    """One space-separated setting from a BEServer config, or None.
+
+    The format is bare `Key value` lines — no quoting, no sections.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        name, _, value = stripped.partition(" ")
+        if name.casefold() == key.casefold():
+            return value.strip() or None
+    return None
+
+
+def ensure_battleye_config(config: Config, instance_name: str, port: int) -> Path | None:
+    """Make sure this instance has a BattlEye config with an RCON password.
+
+    BattlEye ships no default config, so without this there is no RConPassword, RCON
+    never listens, and every restart warning fails against a port nothing is bound to.
+
+    A password is generated with `secrets` when the file is missing or has none. An
+    existing password is never touched — it may already be shared with admin tooling.
+
+    The file is plaintext by necessity: BattlEye reads it directly and has no other way
+    to be told. It is written under the instance's own profiles directory, not somewhere
+    shared, and the value is never logged.
+
+    Returns the config path, or None when management is disabled.
+    """
+    if not config.rcon.manage_battleye_config:
+        return None
+
+    path = battleye_config_path(config, instance_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if read_battleye_setting(path, "RConPassword"):
+        return path
+
+    # Reuse the password from a config BattlEye already consumed, rather than minting a
+    # new one. Without this the password would change on every start, because BattlEye
+    # renames the file it read and there is never a BEServer_x64.cfg to find.
+    existing = read_battleye_password(config, instance_name)
+    if existing:
+        port = read_battleye_port(config, instance_name) or port
+        path.write_text(
+            "// Written by dzsm, restoring the password BattlEye consumed on the last\n"
+            "// start. Delete RConPassword to have a new one generated.\n"
+            f"RConPassword {existing}\n"
+            f"RConPort {port}\n"
+            "RestrictRCon 0\n",
+            encoding="utf-8",
+        )
+        _log.debug("instance %s: restored the existing RCON password", instance_name)
+        return path
+
+    password = secrets.token_urlsafe(24)
+    if path.is_file():
+        # Keep whatever else is configured; only add what is missing.
+        text = path.read_text(encoding="utf-8", errors="replace").rstrip("\n")
+        lines = [text, f"RConPassword {password}"]
+        if read_battleye_setting(path, "RConPort") is None:
+            lines.append(f"RConPort {port}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        _log.info("instance %s: added a generated RCON password to %s", instance_name, path)
+    else:
+        path.write_text(
+            "// Written by dzsm. The password is generated and read back from here;\n"
+            "// BattlEye requires it in plaintext. Delete RConPassword to have a new\n"
+            "// one generated at the next start.\n"
+            f"RConPassword {password}\n"
+            f"RConPort {port}\n"
+            "RestrictRCon 0\n",
+            encoding="utf-8",
+        )
+        _log.info("instance %s: generated a BattlEye RCON config at %s", instance_name, path)
+
+    return path
 
 
 def sync_keys(server_dir: Path, instance_name: str, paths: list[Path]) -> list[Path]:

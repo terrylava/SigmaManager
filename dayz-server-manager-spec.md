@@ -414,9 +414,35 @@ it directly — the framing is worth care because a wrong CRC produces *no reply
 rather than an error, so an encoding bug is indistinguishable from an unreachable server.
 
 **RCON is on by default**, on `port + 3` — the stock DayZ layout, where a 2302 server
-listens for RCON on 2305. `rcon_port` overrides it when a server's BEServer config says
-otherwise; `rcon_enabled = false` opts an instance out entirely. The password comes from
-an environment variable and must match `RConPassword` in that server's BEServer config.
+listens for RCON on 2305. `rcon_port` overrides it; `rcon_enabled = false` opts an
+instance out entirely.
+
+### The BattlEye config
+
+**BattlEye ships no default config.** Without a `BEServer_x64.cfg` containing an
+`RConPassword`, RCON never listens at all — the port is simply closed, and every warning
+fails against nothing. So dzsm writes one per instance before launch, generating a
+password with `secrets`. There is deliberately no default password: a shared one is worse
+than none.
+
+The password is read back from that same file, so nothing has to be exported. An
+environment variable still overrides it for anyone keeping credentials elsewhere.
+
+Two behaviours of BattlEye's own make this fiddlier than it looks:
+
+- **It consumes the file on startup**, renaming `BEServer_x64.cfg` to
+  `BEServer_x64_active_<id>.cfg` (the id is hex, e.g. `1dc`). By the time the server is
+  up, the original is gone. Anything reading the password afterwards must look at the
+  renamed one — and so must anything deciding whether a password already exists, or it
+  would mint a new one on every start and silently rotate the password out from under any
+  admin tooling sharing it. On a clean shutdown BattlEye renames it back.
+- **RCON binds well after the server is otherwise up** — measured at ~43 seconds on a
+  1.29 server, long after the mission has loaded. A connection refused immediately after
+  a start is expected, not a fault. It does not affect restart warnings, which run 30
+  minutes into an instance's life at the earliest.
+
+To rotate a password, delete `RConPassword` from the config (or the file itself) and
+restart; a fresh one is generated.
 
 Warnings come in two tiers, counting down in human terms — "20 minutes", "1 minute",
 "20 seconds":
