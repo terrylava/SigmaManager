@@ -98,7 +98,7 @@ def test_each_instance_gets_its_own_mission(config: Config, server: Path) -> Non
 
     mission = prepare_mission(cfg, server, "chernarus")
 
-    assert mission == "chernarus.chernarusplus"
+    assert mission == "sigma_chernarus.chernarusplus"
     assert (server / "mpmissions" / mission / "init.c").is_file()
 
 
@@ -109,7 +109,7 @@ def test_the_instance_config_points_at_it(config: Config, server: Path) -> None:
 
     prepare_mission(cfg, server, "chernarus")
 
-    assert read_template(instance_config) == "chernarus.chernarusplus"
+    assert read_template(instance_config) == "sigma_chernarus.chernarusplus"
 
 
 def test_the_source_mission_is_untouched(config: Config, server: Path) -> None:
@@ -117,7 +117,7 @@ def test_the_source_mission_is_untouched(config: Config, server: Path) -> None:
     _seed_instance_config(cfg, server)
 
     prepare_mission(cfg, server, "chernarus")
-    (server / "mpmissions" / "chernarus.chernarusplus" / "db" / "types.xml").write_text(
+    (server / "mpmissions" / "sigma_chernarus.chernarusplus" / "db" / "types.xml").write_text(
         "<types>customised</types>", encoding="utf-8"
     )
 
@@ -131,7 +131,7 @@ def test_an_existing_mission_is_never_overwritten(config: Config, server: Path) 
     _seed_instance_config(cfg, server)
     prepare_mission(cfg, server, "chernarus")
 
-    types = server / "mpmissions" / "chernarus.chernarusplus" / "db" / "types.xml"
+    types = server / "mpmissions" / "sigma_chernarus.chernarusplus" / "db" / "types.xml"
     types.write_text("<types>hand-tuned</types>", encoding="utf-8")
     prepare_mission(cfg, server, "chernarus")
 
@@ -154,8 +154,8 @@ def test_two_instances_do_not_share_a_mission(config: Config, server: Path) -> N
     first = prepare_mission(cfg, server, "chernarus")
     second = prepare_mission(cfg, server, "sakhal")
 
-    assert first == "chernarus.chernarusplus"
-    assert second == "sakhal.sakhal"
+    assert first == "sigma_chernarus.chernarusplus"
+    assert second == "sigma_sakhal.sakhal"
 
     types = server / "mpmissions" / str(first) / "db" / "types.xml"
     types.write_text("<types>chernarus only</types>", encoding="utf-8")
@@ -173,7 +173,7 @@ def test_persistence_is_not_copied(config: Config, server: Path) -> None:
 
     prepare_mission(cfg, server, "chernarus")
 
-    seeded = server / "mpmissions" / "chernarus.chernarusplus"
+    seeded = server / "mpmissions" / "sigma_chernarus.chernarusplus"
     assert (seeded / "init.c").is_file(), "the mission itself is still copied"
     assert not (seeded / "storage_1").exists()
 
@@ -189,7 +189,7 @@ def test_the_terrain_comes_from_the_source(config: Config, server: Path) -> None
     cfg = _cfg(config, mission_source=SAKHAL)
     _seed_instance_config(cfg, server)
 
-    assert prepare_mission(cfg, server, "chernarus") == "chernarus.sakhal"
+    assert prepare_mission(cfg, server, "chernarus") == "sigma_chernarus.sakhal"
 
 
 def test_a_missing_source_lists_what_exists(config: Config, server: Path) -> None:
@@ -222,7 +222,7 @@ def test_can_be_disabled(config: Config, server: Path) -> None:
     _seed_instance_config(cfg, server)
 
     assert prepare_mission(cfg, server, "chernarus") is None
-    assert not (server / "mpmissions" / "chernarus.chernarusplus").exists()
+    assert not (server / "mpmissions" / "sigma_chernarus.chernarusplus").exists()
 
 
 def test_an_explicit_mission_still_applies_when_disabled(

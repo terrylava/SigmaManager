@@ -228,6 +228,11 @@ class Config(BaseModel):
     # AND the persistence storage, so instances sharing one would clobber each other's
     # economy and saves. Set false only if you deliberately want them shared.
     per_instance_missions: bool = True
+    # Prefix for derived mission names, so dzsm-managed missions are obvious next to
+    # vanilla's dayzOffline.* ones. The instance name is still included — a bare prefix
+    # would put every instance back on one shared mission, which is the collision
+    # per-instance missions exist to prevent.
+    mission_prefix: str = "sigma"
     # How often the supervision loop checks liveness and the restart schedule.
     supervise_poll_seconds: int = 15
     # Grace period for a server to shut down before it is killed. DayZ flushes
@@ -370,6 +375,18 @@ class Config(BaseModel):
                     f"temporarily disabled"
                 )
         return self
+
+    @field_validator("mission_prefix")
+    @classmethod
+    def _prefix_must_be_a_safe_name(cls, v: str) -> str:
+        # A dot would break DayZ's "<MissionName>.<TerrainName>" parsing; a space would
+        # break the launch arguments.
+        if not v or any(c in v for c in ". \t/\\"):
+            raise ValueError(
+                f"mission_prefix must be a simple name with no dots, spaces, or path "
+                f"separators, got {v!r}"
+            )
+        return v
 
     @field_validator("gc_retention_days")
     @classmethod

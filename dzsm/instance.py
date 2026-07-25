@@ -8,6 +8,7 @@ just building this list with a different path in it.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -166,9 +167,13 @@ def prepare_server_directory(
     if target.is_dir() and current == build and not refresh:
         return target, build
 
+    stash: Path | None = None
     if target.exists():
         reason = "refresh requested" if refresh else f"build {current} -> {build}"
         _log.info("instance %s: replacing isolated server copy (%s)", instance_name, reason)
+        # Missions live inside the server directory, so replacing it would take this
+        # instance's tuned economy and its persistence with it. Set them aside first.
+        stash = _stash_custom_missions(target, source)
         safe_rmtree(target)
 
     _log.info(
@@ -178,8 +183,64 @@ def prepare_server_directory(
         target,
     )
     promote_tree(source, target, strategy=config.snapshot_strategy)
+    if stash is not None:
+        _restore_missions(stash, target / "mpmissions", instance_name)
     marker.write_text(build, encoding="utf-8")
     return target, build
+
+
+def _stash_custom_missions(server_dir: Path, source: Path) -> Path | None:
+    """Move missions the incoming build does not ship out of the way. None if there are
+    none.
+
+    Only missions absent from the new build are kept: vanilla's own come back with it,
+    and preferring the new copy of those means map updates are not silently pinned to an
+    old build's files.
+    """
+    existing = server_dir / "mpmissions"
+    incoming = source / "mpmissions"
+    if not existing.is_dir():
+        return None
+
+    custom = [
+        mission
+        for mission in existing.iterdir()
+        if mission.is_dir() and not (incoming / mission.name).exists()
+    ]
+    if not custom:
+        return None
+
+    stash = server_dir.parent / f".missions-stash-{os.getpid()}"
+    safe_rmtree(stash)
+    stash.mkdir(parents=True)
+    for mission in custom:
+        shutil.move(str(mission), str(stash / mission.name))
+    return stash
+
+
+def _restore_missions(stash: Path, destination: Path, instance_name: str) -> None:
+    """Put stashed missions back into a freshly copied server directory."""
+    destination.mkdir(parents=True, exist_ok=True)
+    for mission in list(stash.iterdir()):
+        target = destination / mission.name
+        if target.exists():
+            # The new build ships one by this name after all; keep the new one and drop
+            # the stashed copy rather than guessing which is wanted.
+            _log.warning(
+                "instance %s: new build already provides mission %s, discarding the "
+                "stashed copy at %s",
+                instance_name,
+                mission.name,
+                mission,
+            )
+            continue
+        shutil.move(str(mission), str(target))
+        _log.info(
+            "instance %s: preserved mission %s across the build change",
+            instance_name,
+            mission.name,
+        )
+    safe_rmtree(stash)
 
 
 def server_executable(server_dir: Path) -> Path:
@@ -230,6 +291,41 @@ DEFAULT_TERRAIN = "chernarusplus"
 def _ignore_persistence(directory: str, names: list[str]) -> set[str]:
     """Skip storage_* when seeding a mission — that is another server's saved world."""
     return {name for name in names if name.startswith("storage_")}
+
+
+def _mission_from_another_build(
+    config: Config, mission: str, *, exclude: Path
+) -> Path | None:
+    """The same mission under a different server build, newest first.
+
+    Version directories are kept, so after a server update the previous build still holds
+    this instance's tuned economy and its persistence. `exclude` is the mpmissions
+    directory being seeded into, so a build never carries forward from itself.
+    """
+    if not config.serverapp_dir.is_dir():
+        return None
+
+    candidates = [
+        build
+        for build in config.serverapp_dir.iterdir()
+        if build.is_dir()
+        and (build / "mpmissions") != exclude
+        and (build / "mpmissions" / mission).is_dir()
+    ]
+    if not candidates:
+        return None
+
+    # Ordered by build id, which is the canonical version identity — the same reasoning
+    # as mod versions. Directory mtime would not work: it does not change when a nested
+    # file like db/types.xml is edited, so the most recently *used* build is invisible
+    # to it.
+    newest = max(candidates, key=lambda build: _build_sort_key(build.name))
+    return newest / "mpmissions" / mission
+
+
+def _build_sort_key(name: str) -> tuple[int, str]:
+    """Numeric build ids sort numerically; anything else falls back to name order."""
+    return (int(name), "") if name.isdigit() else (-1, name)
 
 
 def read_template(config_file: Path) -> str | None:
@@ -324,17 +420,36 @@ def prepare_mission(config: Config, server_dir: Path, instance_name: str) -> str
     source = missions / source_name
 
     terrain = source_name.split(".", 1)[1] if "." in source_name else DEFAULT_TERRAIN
-    mission = instance.mission or f"{instance_name}.{terrain}"
+    mission = instance.mission or f"{config.mission_prefix}_{instance_name}.{terrain}"
     target = missions / mission
 
     if not target.exists():
-        _log.info(
-            "instance %s: seeding mission %s from %s", instance_name, mission, source_name
-        )
-        # Persistence lives in storage_<instanceId>/ inside the mission. Copying it would
-        # hand this instance another server's saved world, so a seeded mission starts
-        # empty and the engine creates its own on first run.
-        promote_tree(source, target, ignore=_ignore_persistence)
+        # Carry the mission forward from another build before falling back to vanilla.
+        # Missions live under the server directory because the engine resolves them
+        # relative to it, so a server update would otherwise reset every instance's
+        # economy to vanilla and orphan its persistence in the old build's directory.
+        carried = _mission_from_another_build(config, mission, exclude=missions)
+        if carried is not None:
+            _log.info(
+                "instance %s: carrying mission %s forward from %s",
+                instance_name,
+                mission,
+                carried.parent.parent,
+            )
+            # Persistence comes too: the same instance's saved world should survive a
+            # server update, unlike a mission freshly seeded from vanilla.
+            promote_tree(carried, target)
+        else:
+            _log.info(
+                "instance %s: seeding mission %s from %s",
+                instance_name,
+                mission,
+                source_name,
+            )
+            # Persistence lives in storage_<instanceId>/ inside the mission. Copying it
+            # would hand this instance another server's saved world, so a seeded mission
+            # starts empty and the engine creates its own on first run.
+            promote_tree(source, target, ignore=_ignore_persistence)
 
     write_template(config.instance_dir(instance_name) / instance.config_file, mission)
     return mission

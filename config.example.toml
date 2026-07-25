@@ -18,6 +18,10 @@ snapshot_strategy = "copy"
 # vanilla one. On by default: mission folders hold types.xml, events.xml, init.c AND the
 # persistence storage, so instances sharing one clobber each other's economy and saves.
 per_instance_missions = true
+# Prefix for derived mission names, so dzsm's are obvious next to vanilla's dayzOffline.*
+# ones: "sigma_chernarus.chernarusplus". The instance name stays in it — a bare prefix
+# would put every instance back on one shared mission.
+mission_prefix = "sigma"
 
 [rcon]
 # BattlEye RCON, used for restart warnings and admin chat. On by default for every

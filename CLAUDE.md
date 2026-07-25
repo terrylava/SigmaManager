@@ -203,9 +203,20 @@ restart so it counts from the new process. A down instance has no uptime deadlin
 arithmetic is naive local, so it is normalised on the way in rather than raising.
 
 **Missions are per-instance by default** (`per_instance_missions`). The engine has no
-mission path argument, so this means per-instance mission *names* — `<instance>.<terrain>`
-inside the server's `mpmissions/`, seeded once from a vanilla mission and never
-overwritten afterwards. Tens of MB, versus the several GB an isolated server costs.
+mission path argument, so this means per-instance mission *names* —
+`<mission_prefix>_<instance>.<terrain>`, default `sigma_chernarus.chernarusplus`, inside
+the server's `mpmissions/`, seeded once and never overwritten afterwards. The instance
+name must stay in the derived name: a bare prefix would put every instance back on one
+shared mission.
+
+**A mission missing from the current build is carried forward from the newest other
+build**, not re-seeded from vanilla. Without that, a server update silently reverts every
+instance's economy and orphans its persistence in the old build's directory, while the
+server comes up looking healthy. Persistence is copied in that case — it is the same
+instance's own saved world. Isolated instances get the same protection via a stash across
+the server-copy replace, which happens before mission handling could otherwise help.
+"Newest" is by build id, not directory mtime: mtime does not change when a nested file is
+edited. Tens of MB, versus the several GB an isolated server costs.
 `storage_*` is excluded when seeding, since that is another server's saved world. dzsm
 owns the `template` line in the instance's serverDZ.cfg and keeps it pointed at the
 resolved mission — validating instead would leave a mismatched instance quietly running

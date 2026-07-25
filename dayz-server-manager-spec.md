@@ -511,8 +511,34 @@ its own loot tables.
 
 The engine has no mission path argument — it resolves `mpmissions/<template>` relative to
 the server directory. So per-instance missions mean per-instance mission *names* inside
-that directory: `<instance>.<terrain>`, seeded once from a vanilla mission. That costs
-tens of MB rather than the several GB an isolated server copy would.
+that directory: `<mission_prefix>_<instance>.<terrain>` (default `sigma_chernarus.
+chernarusplus`), seeded once from a vanilla mission. That costs tens of MB rather than the
+several GB an isolated server copy would.
+
+The prefix makes dzsm-managed missions obvious next to vanilla's `dayzOffline.*`. The
+instance name stays in it deliberately: a bare prefix would put every instance back on one
+shared mission, which is the collision this exists to prevent.
+
+### Missions survive a server update
+
+Because missions live under the server build, a new build would otherwise find no mission
+for an instance and re-seed from vanilla — silently reverting a tuned economy and orphaning
+the persistence in the old build's directory, while the server comes up looking healthy.
+
+So a mission missing from the current build is **carried forward** from the newest other
+build that has it, and only seeded from vanilla when no previous copy exists anywhere.
+Persistence comes with it, which is the one case `storage_*` is deliberately copied: it is
+the same instance's own saved world, not somebody else's. The old build keeps its copy, so
+rolling back still works.
+
+Isolated instances need the same protection by a different route — their server copy is
+replaced wholesale on a build change, and that happens *before* mission handling could
+help. Missions the incoming build does not ship are set aside and restored afterwards.
+Vanilla missions are not, so a map update is never pinned to an old build's files.
+
+"Newest other build" is ordered by build id, not directory mtime: a directory's mtime does
+not change when a nested file like `db/types.xml` is edited, so the build actually in use
+would be invisible to it.
 
 - `mission` overrides the derived name; `mission_source` overrides what it is seeded from.
 - An existing mission directory is **never overwritten** — once seeded it is yours to edit,
