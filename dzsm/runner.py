@@ -124,10 +124,16 @@ def stop(config: Config, state: State, instance_name: str, *, timeout: float | N
 
     grace = config.stop_timeout_seconds if timeout is None else timeout
     _log.info("instance %s: stopping pid %s (up to %.0fs)", instance_name, process.pid, grace)
+
+    # Escalating: ask nicely over RCON, then signal, then kill. DayZ flushes persistence
+    # on its own shutdown path, so #shutdown is the only one that is properly clean.
+    if _request_shutdown(config, instance_name) and _wait_for_exit(process, grace):
+        state.processes.pop(instance_name, None)
+        _log.info("instance %s: shut down via rcon", instance_name)
+        return
+
     process.terminate()
-    try:
-        process.wait(timeout=grace)
-    except psutil.TimeoutExpired:
+    if not _wait_for_exit(process, grace):
         _log.warning(
             "instance %s: pid %s did not exit within %.0fs, killing",
             instance_name,
@@ -147,16 +153,23 @@ def is_running(config: Config, state: State, instance_name: str) -> bool:
     return _live_process(config, state, instance_name) is not None
 
 
-def next_restart(instance: InstanceConfig, *, now: datetime | None = None) -> datetime | None:
-    """Next scheduled restart, or None if the instance has no schedule.
+def next_restart(
+    instance: InstanceConfig,
+    *,
+    started_at: datetime | None = None,
+    now: datetime | None = None,
+) -> datetime | None:
+    """When this instance restarts next, or None if nothing schedules it.
 
-    Times are local "HH:MM". An entry that has already passed today rolls to tomorrow.
+    Two independent sources, whichever comes first:
+
+    - `restart_schedule`, local "HH:MM" times. An entry already past today rolls over.
+    - `restart_after_hours`, measured from when the instance actually started. Needs
+      started_at; without it (the instance is down) there is no uptime to measure.
     """
-    if not instance.restart_schedule:
-        return None
-
-    current = now or datetime.now()
+    current = _local(now) or datetime.now()
     candidates: list[datetime] = []
+
     for entry in instance.restart_schedule:
         try:
             hour, _, minute = entry.partition(":")
@@ -170,7 +183,24 @@ def next_restart(instance: InstanceConfig, *, now: datetime | None = None) -> da
             scheduled += timedelta(days=1)
         candidates.append(scheduled)
 
+    started = _local(started_at)
+    if instance.restart_after_hours is not None and started is not None:
+        candidates.append(started + timedelta(hours=instance.restart_after_hours))
+
     return min(candidates) if candidates else None
+
+
+def _local(value: datetime | None) -> datetime | None:
+    """Normalise to naive local time.
+
+    State records timezone-aware timestamps; the scheduling arithmetic here is all naive
+    local. Mixing the two raises, so everything is converted on the way in.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone().replace(tzinfo=None)
 
 
 def rcon_client(config: Config, instance_name: str) -> RconClient | None:
@@ -232,7 +262,7 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
     for name in instance_names:
         if not is_running(config, state, name):
             _start_and_save(config, state, name, reason="initial start")
-        due[name] = next_restart(config.instances[name])
+        due[name] = _due_at(config, state, name)
 
     _log.info("supervising %s; Ctrl-C to stop", ", ".join(instance_names))
     try:
@@ -247,19 +277,24 @@ def supervise(config: Config, state: State, instance_names: list[str]) -> None:
                     _warn_players(config, name, warned, remaining=0.0, final=True)
                     _restart_and_save(config, state, name)
                     warned.pop(name, None)
-                    due[name] = next_restart(config.instances[name], now=now)
+                    # Recomputed after the restart, so an uptime-based window starts
+                    # counting from the new process rather than the old one.
+                    due[name] = _due_at(config, state, name)
                     continue
 
                 if scheduled is not None:
-                    remaining = (scheduled - now).total_seconds()
-                    if remaining <= config.rcon.warning_lead_seconds:
-                        _warn_players(config, name, warned, remaining=remaining)
+                    # _warn_players decides which tier applies, or stays quiet.
+                    _warn_players(
+                        config, name, warned, remaining=(scheduled - now).total_seconds()
+                    )
 
                 if not is_running(config, state, name):
                     # Crash restart. Activation runs again here, so a mod that finished
                     # downloading since the last start is picked up now.
                     _log.warning("instance %s: process gone, restarting", name)
                     _start_and_save(config, state, name, reason="crash restart")
+                    warned.pop(name, None)
+                    due[name] = _due_at(config, state, name)
     except KeyboardInterrupt:
         _log.info("supervision interrupted; leaving instances running")
 
@@ -298,20 +333,38 @@ def _versions_to_activate(config: Config, state: State, instance_name: str) -> d
         return fallback
 
 
+def warning_interval(config: Config, remaining: float) -> int | None:
+    """How often to warn at this distance from a restart, or None to stay quiet.
+
+    Two tiers: every 5 minutes from 30 minutes out, then every 4 seconds for the last 5.
+    """
+    if remaining <= config.rcon.final_warning_lead_seconds:
+        return config.rcon.final_warning_interval_seconds
+    if remaining <= config.rcon.early_warning_lead_seconds:
+        return config.rcon.early_warning_interval_seconds
+    return None
+
+
 def _tick_seconds(config: Config, due: Mapping[str, datetime | None]) -> float:
     """How long to sleep before the next pass.
 
-    Normally the poll interval, but it drops to the warning interval once any instance is
-    inside its warning window — otherwise a 15s poll could not send a message every 4s.
+    The poll interval, shortened when an instance is close enough to a restart that
+    warnings need to go out faster — a 15s poll cannot deliver a message every 4s. Never
+    lengthened past the poll interval: crash detection still has to happen on time during
+    the slow early tier.
     """
     now = datetime.now()
+    tick = float(config.supervise_poll_seconds)
     for scheduled in due.values():
         if scheduled is None:
             continue
         remaining = (scheduled - now).total_seconds()
-        if 0 < remaining <= config.rcon.warning_lead_seconds:
-            return float(config.rcon.warning_interval_seconds)
-    return float(config.supervise_poll_seconds)
+        if remaining <= 0:
+            continue
+        interval = warning_interval(config, remaining)
+        if interval is not None:
+            tick = min(tick, float(interval))
+    return tick
 
 
 def _warn_players(
@@ -330,9 +383,12 @@ def _warn_players(
     """
     now = datetime.now()
     last = warned.get(instance_name)
-    interval = config.rcon.warning_interval_seconds
-    if not final and last is not None and (now - last).total_seconds() < interval:
-        return
+    interval = warning_interval(config, remaining)
+    if not final:
+        if interval is None:
+            return
+        if last is not None and (now - last).total_seconds() < interval:
+            return
 
     message = config.rcon.warning_message.format(remaining=humanize(remaining))
     try:
@@ -352,6 +408,52 @@ def _warn_players(
         warned[instance_name] = now
     finally:
         client.close()
+
+
+def _due_at(config: Config, state: State, instance_name: str) -> datetime | None:
+    """When this instance is next due to restart, using its current process start time."""
+    process = state.processes.get(instance_name)
+    return next_restart(
+        config.instances[instance_name],
+        started_at=process.started_at if process else None,
+    )
+
+
+def _request_shutdown(config: Config, instance_name: str) -> bool:
+    """Ask the server to stop over RCON. True if the request went out.
+
+    False means "fall through to signalling it" — not configured, unreachable, or the
+    server died before replying. Never raises: stopping must work with RCON broken.
+    """
+    if not config.rcon.shutdown_via_rcon:
+        return False
+    try:
+        client = rcon_client(config, instance_name)
+    except RconError as exc:
+        _log.warning("instance %s: rcon unavailable for shutdown: %s", instance_name, exc)
+        return False
+    if client is None:
+        return False
+
+    try:
+        client.shutdown()
+    except RconError as exc:
+        # The server frequently dies before answering, which surfaces as a missing reply.
+        # Treat it as sent and let the wait below decide whether it actually worked.
+        _log.debug("instance %s: no reply to #shutdown (%s)", instance_name, exc)
+    finally:
+        client.close()
+    return True
+
+
+def _wait_for_exit(process: psutil.Process, timeout: float) -> bool:
+    try:
+        process.wait(timeout=timeout)
+    except psutil.TimeoutExpired:
+        return False
+    except psutil.Error:
+        return True
+    return True
 
 
 def _create_time(pid: int) -> float | None:

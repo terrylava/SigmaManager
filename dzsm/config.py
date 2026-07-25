@@ -103,12 +103,20 @@ class RconConfig(BaseModel):
     # the password itself is never in config.
     password_env: str = "DZSM_RCON_PASSWORD"  # noqa: S105 — a var name, not a secret
     timeout_seconds: float = 5.0
-    # How long before a scheduled restart the warnings start.
-    warning_lead_seconds: int = 300
-    # How often to repeat them during that window.
-    warning_interval_seconds: int = 4
+    # Warnings come in two tiers. From `early_warning_lead_seconds` before a restart they
+    # repeat every `early_warning_interval_seconds`; inside `final_warning_lead_seconds`
+    # they switch to `final_warning_interval_seconds`. Defaults: every 5 minutes from 30
+    # minutes out, then every 4 seconds for the last 5 minutes.
+    early_warning_lead_seconds: int = 1800
+    early_warning_interval_seconds: int = 300
+    final_warning_lead_seconds: int = 300
+    final_warning_interval_seconds: int = 4
     # {remaining} is filled with a human phrase like "2 minutes" or "20 seconds".
     warning_message: str = "Server restart in {remaining}"
+    # Stop servers with RCON's #shutdown rather than signalling the process, so DayZ
+    # closes down on its own terms and flushes persistence. Falls back to terminate then
+    # kill if it does not exit.
+    shutdown_via_rcon: bool = True
 
     def password(self, override_env: str | None = None) -> str | None:
         return os.environ.get(override_env or self.password_env) or None
@@ -154,6 +162,9 @@ class InstanceConfig(BaseModel):
     keep_mods: list[str] = Field(default_factory=list)
     # "HH:MM" local times.
     restart_schedule: list[str] = Field(default_factory=list)
+    # Restart this many hours after the instance started. Independent of
+    # restart_schedule; when both are set, whichever comes first wins. None disables it.
+    restart_after_hours: float | None = 4.0
     extra_args: list[str] = Field(default_factory=list)
 
 

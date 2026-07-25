@@ -163,7 +163,10 @@ def create_app(config_path: Path) -> FastAPI:
         state = current_state()
         result = []
         for name, instance in config.instances.items():
-            upcoming = runner.next_restart(instance)
+            process = state.processes.get(name)
+            upcoming = runner.next_restart(
+                instance, started_at=process.started_at if process else None
+            )
             result.append(
                 {
                     "name": name,

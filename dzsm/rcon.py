@@ -163,6 +163,15 @@ class RconClient:
         """Broadcast to every player. `say -1` is BattlEye's global admin chat."""
         self.command(f"say -1 {message}")
 
+    def shutdown(self) -> None:
+        """Ask the server to stop.
+
+        Lets DayZ close down on its own terms and flush persistence, rather than being
+        signalled from outside. The server usually dies before replying, so a missing
+        reply is not treated as failure by callers.
+        """
+        self.command("#shutdown")
+
     def _require_socket(self) -> socket.socket:
         if self._socket is None:
             raise RconError("not connected")

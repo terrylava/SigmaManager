@@ -26,9 +26,15 @@ host = "127.0.0.1"
 # The password is read from this env var, never from config. It must match RConPassword
 # in the server's BEServer config (under <profiles>/BattlEye/).
 password_env = "DZSM_RCON_PASSWORD"
-# Warnings start this long before a scheduled restart, and repeat this often.
-warning_lead_seconds = 300
-warning_interval_seconds = 4
+# Warnings come in two tiers: every 5 minutes from 30 minutes out, then every 4 seconds
+# for the last 5 minutes.
+early_warning_lead_seconds = 1800
+early_warning_interval_seconds = 300
+final_warning_lead_seconds = 300
+final_warning_interval_seconds = 4
+# Stop servers with RCON's #shutdown so DayZ flushes persistence on its own shutdown
+# path. Falls back to terminate, then kill, if it does not exit.
+shutdown_via_rcon = true
 # {remaining} becomes "5 minutes", "1 minute", "20 seconds".
 warning_message = "Server restart in {remaining}"
 
@@ -95,6 +101,9 @@ keep_mods = []
 # shared state with any other instance.
 isolated_server = false
 restart_schedule = ["04:00", "10:00", "16:00", "22:00"]
+# Also restart this many hours after the instance starts, independently of the schedule
+# above — whichever comes first wins. Defaults to 4. Set to nothing to disable.
+restart_after_hours = 4
 
 [instances.testing]
 port = 2402

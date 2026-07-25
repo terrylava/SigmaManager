@@ -150,6 +150,53 @@ def test_an_instance_without_rcon_is_silently_skipped(
     assert warned == {}
 
 
+# --- the two tiers -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected"),
+    [
+        (3600, None),   # an hour out: silence
+        (1801, None),   # just outside the early window
+        (1800, 300),    # 30 minutes: every 5 minutes
+        (600, 300),     # still the early tier
+        (301, 300),     # one second before the switch
+        (300, 4),       # 5 minutes: every 4 seconds
+        (10, 4),
+        (0, 4),
+    ],
+)
+def test_the_interval_tiers(cfg: Config, remaining: int, expected: int | None) -> None:
+    """Every 5 minutes from 30 minutes out, then every 4 seconds for the last 5."""
+    assert runner.warning_interval(cfg, remaining) == expected
+
+
+def test_the_early_tier_repeats_at_five_minutes(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = _Recorder()
+    monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
+    warned = {"chernarus": datetime.now() - timedelta(seconds=299)}
+
+    runner._warn_players(cfg, "chernarus", warned, remaining=1200)
+    assert recorder.said == [], "299s after the last is still inside the 5 minute tier"
+
+    warned["chernarus"] = datetime.now() - timedelta(seconds=301)
+    runner._warn_players(cfg, "chernarus", warned, remaining=1200)
+    assert recorder.said == ["Server restart in 20 minutes"]
+
+
+def test_nothing_is_said_outside_both_windows(
+    cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = _Recorder()
+    monkeypatch.setattr(runner, "rcon_client", lambda config, name: recorder)
+
+    runner._warn_players(cfg, "chernarus", {}, remaining=7200)
+
+    assert recorder.said == []
+
+
 # --- loop timing -------------------------------------------------------------
 
 
@@ -158,11 +205,18 @@ def test_the_loop_ticks_slowly_when_no_restart_is_near(cfg: Config) -> None:
     assert runner._tick_seconds(cfg, due) == cfg.supervise_poll_seconds
 
 
-def test_the_loop_ticks_at_the_warning_interval_inside_the_window(cfg: Config) -> None:
+def test_the_loop_ticks_fast_inside_the_final_window(cfg: Config) -> None:
     """A 15s poll cannot deliver a message every 4s, so the tick has to shorten."""
     due = {"chernarus": datetime.now() + timedelta(seconds=60)}
 
-    assert runner._tick_seconds(cfg, due) == cfg.rcon.warning_interval_seconds
+    assert runner._tick_seconds(cfg, due) == cfg.rcon.final_warning_interval_seconds
+
+
+def test_the_early_window_does_not_slow_the_loop_down(cfg: Config) -> None:
+    """The early tier warns every 5 minutes, but crash detection still needs the poll."""
+    due = {"chernarus": datetime.now() + timedelta(minutes=20)}
+
+    assert runner._tick_seconds(cfg, due) == cfg.supervise_poll_seconds
 
 
 def test_an_instance_with_no_schedule_does_not_speed_up_the_loop(cfg: Config) -> None:
@@ -170,7 +224,9 @@ def test_an_instance_with_no_schedule_does_not_speed_up_the_loop(cfg: Config) ->
 
 
 def test_a_custom_interval_is_honoured(config: Config) -> None:
-    tuned = config.model_copy(update={"rcon": RconConfig(warning_interval_seconds=10)})
+    tuned = config.model_copy(
+        update={"rcon": RconConfig(final_warning_interval_seconds=10)}
+    )
     due = {"chernarus": datetime.now() + timedelta(seconds=30)}
 
     assert runner._tick_seconds(tuned, due) == 10

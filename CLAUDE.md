@@ -165,11 +165,22 @@ an unreachable server — hence the byte-level tests. Server-message packets mus
 acknowledged or BattlEye retransmits them, and they interleave with command replies, so
 the client acks and keeps waiting rather than treating one as the answer.
 
-Scheduled restarts broadcast `say -1` every `warning_interval_seconds` (4) for the last
-`warning_lead_seconds` (300), and the supervise tick shortens to match — a 15s poll cannot
-deliver a message every 4s. **A warning failure must never affect the restart**: an
-unreachable port or bad password is logged and the restart proceeds. Same reasoning as
-Rule 4 — a silent restart is a nuisance, a server that fails to restart is an outage.
+Restart warnings run in two tiers: every 5 minutes from 30 minutes out, then every 4
+seconds for the last 5. The supervise tick shortens to 4s inside the final window — a 15s
+poll cannot deliver a message every 4s — but is never lengthened during the early tier,
+since crash detection still has to happen on time.
+
+**A warning failure must never affect the restart**: an unreachable port or bad password
+is logged and the restart proceeds. Same reasoning as Rule 4 — a silent restart is a
+nuisance, a server that fails to restart is an outage. The same applies to `stop`, which
+escalates RCON `#shutdown` → terminate → kill; only the first flushes persistence
+properly, but none of them may block on RCON working.
+
+**Restarts have two sources**: `restart_schedule` (wall-clock) and `restart_after_hours`
+(uptime, **default 4**), whichever is sooner. The uptime deadline is recomputed after each
+restart so it counts from the new process. A down instance has no uptime deadline.
+`next_restart` needs `started_at` — state stores it timezone-aware and the scheduling
+arithmetic is naive local, so it is normalised on the way in rather than raising.
 
 **Missions are per-instance by default** (`per_instance_missions`). The engine has no
 mission path argument, so this means per-instance mission *names* — `<instance>.<terrain>`

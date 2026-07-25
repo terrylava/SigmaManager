@@ -417,13 +417,41 @@ An instance participates only when it sets `rcon_port`; dzsm never guesses one. 
 password comes from an environment variable and must match `RConPassword` in that
 server's BEServer config.
 
-When a scheduled restart is within `warning_lead_seconds` (default 300), the supervisor
-broadcasts `say -1 <message>` every `warning_interval_seconds` (default 4), counting down
-in human terms — "5 minutes", "1 minute", "20 seconds" — plus one final message at the
-restart itself that ignores the rate limit.
+Warnings come in two tiers, counting down in human terms — "20 minutes", "1 minute",
+"20 seconds":
 
-The supervision loop's tick shortens to the warning interval inside that window;
-a 15-second poll obviously cannot deliver a message every 4 seconds.
+| From | Interval |
+|---|---|
+| 30 minutes before (`early_warning_lead_seconds`) | every 5 minutes |
+| 5 minutes before (`final_warning_lead_seconds`) | every 4 seconds |
+
+plus one final message at the restart itself that ignores the rate limit.
+
+The supervision loop's tick shortens to 4 seconds inside the final window — a 15-second
+poll obviously cannot deliver a message every 4 seconds — but is never *lengthened* during
+the slow early tier, because crash detection still has to happen on time.
+
+### Stopping a server
+
+`stop` escalates: RCON `#shutdown` → `terminate()` → `kill()`. Only the first is properly
+clean, since DayZ flushes persistence on its own shutdown path rather than when signalled
+from outside. Each step waits `stop_timeout_seconds` before the next.
+
+The server usually dies before answering `#shutdown`, so a missing reply is not treated as
+failure — whether it worked is decided by watching the process, not by the reply. RCON not
+being configured, or being unreachable, simply falls through to signalling.
+
+### Restart timing
+
+Two independent sources, whichever comes first:
+
+- `restart_schedule`, wall-clock "HH:MM" times.
+- `restart_after_hours`, measured from when the instance actually started. **Defaults to
+  4.** Set to nothing to disable.
+
+The uptime deadline is recomputed after every restart, so it counts from the new process
+rather than drifting from the old one. An instance that is down has no uptime deadline —
+there is nothing to measure from.
 
 **Warnings are never allowed to affect the restart.** An unreachable port, a wrong
 password, or a mid-send failure is logged and the restart proceeds on schedule — the same

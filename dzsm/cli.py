@@ -721,7 +721,10 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
     for name, instance in cfg.instances.items():
         running = runner.is_running(cfg, state, name)
         marker = typer.style("running", fg=typer.colors.GREEN) if running else "stopped"
-        upcoming = runner.next_restart(instance)
+        process = state.processes.get(name)
+        upcoming = runner.next_restart(
+            instance, started_at=process.started_at if process else None
+        )
         when = upcoming.strftime("%Y-%m-%d %H:%M") if upcoming else "no schedule"
         pins = state.pins.get(name, {})
         versions = ", ".join(f"{k}={v}" for k, v in pins.items()) or "(none pinned)"
