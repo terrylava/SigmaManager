@@ -279,9 +279,16 @@ The running daemon adopts edits live — the API rebinds `config` (every route c
 the same name) and the supervisor re-reads it each pass, keeping the last good one if the
 file is momentarily unparseable.
 
-**A running server holds `serverDZ.cfg` open on Windows**, so `os.replace` fails with
-access denied. That is `settings.FileLocked` → 409, not a 500: the same locking constraint
-as the mod cache, on a file nobody expects it on.
+**The engine locks its `-config` file for the whole run** — in-place writes and atomic
+replaces both fail on it, and only that file is locked. So instances launch from
+`serverDZ.active.cfg`, regenerated from the editable `serverDZ.cfg` at every start. Do not
+point `-config` back at the editable file; that is what makes it uneditable while running.
+`settings.FileLocked` → 409 still covers whatever else may be locked.
+
+**`prepare_server_config` reads with `utf-8-sig`.** A Windows-saved config often has a
+byte-order mark; read as plain UTF-8 it becomes a U+FEFF character, and prepending the
+header buries it mid-file, corrupting the first setting. The server then dies during
+startup with nothing useful in the RPT — which is exactly what happened once.
 
 **`cpu_affinity` is core numbers, not a bitmask**, and `priority` is a name, not a number
 — Windows wants priority classes while POSIX wants nice values where lower is higher, so

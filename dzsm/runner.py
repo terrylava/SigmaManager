@@ -29,6 +29,7 @@ from dzsm.instance import (
     ensure_battleye_config,
     ensure_layout,
     prepare_mission,
+    prepare_server_config,
     prepare_server_directory,
     read_battleye_password,
     read_battleye_port,
@@ -96,7 +97,12 @@ def start(
     # load it — but omitting it would kick any player who happens to have that mod
     # enabled, and keys are tiny. Matches how admins populate the directory by hand.
     sync_keys(server_dir, instance_name, [*paths, *server_paths])
-    argv = build_launch_args(config, instance_name, instance, exe, paths, server_paths)
+    # Launch from a copy, so serverDZ.cfg stays editable while the server runs. Made
+    # after prepare_mission, which writes the template line into the editable file.
+    active_config = prepare_server_config(config, instance_name)
+    argv = build_launch_args(
+        config, instance_name, instance, exe, paths, server_paths, active_config
+    )
     _log.info("instance %s: starting on port %s", instance_name, instance.port)
     _log.debug("instance %s: argv %s", instance_name, argv)
 

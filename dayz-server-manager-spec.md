@@ -508,10 +508,24 @@ down; it keeps the last one that loaded.
 engine's format, not ours, and rejecting keys dzsm does not recognise would block exactly
 the settings people come to the editor for.
 
-**A running server holds `serverDZ.cfg` open on Windows**, so replacing it fails with
-access denied — the same locking constraint the mod cache is built around, surfacing on
-the config file. That returns 409 with an explanation rather than a 500, and it costs
-nothing in practice: the change would only take effect at the next start anyway.
+**The engine locks its `-config` file for the whole run** — neither an in-place write nor
+an atomic replace succeeds on it while the server is up. Only that one file is locked;
+every other copy on disk stays writable.
+
+So the server is launched from a **copy**: `serverDZ.cfg` is the file people edit, and
+`serverDZ.active.cfg` is regenerated from it at every start and passed to `-config`. That
+keeps the editable file free at all times, and an edit lands at the next start — the only
+time the server reads it anyway. This is how om.py did it, which is where the idea came
+from.
+
+The copy **strips a byte-order mark** while making it. A serverDZ.cfg saved by a Windows
+editor often starts with one; read as plain UTF-8 it survives as a U+FEFF character, and
+prepending the generated header buries it mid-file where it corrupts the first real
+setting. The server then exits during startup having written nothing useful to the RPT.
+That was observed, not theorised.
+
+A locked file still raises `FileLocked` → 409 rather than a 500, for the cases that remain
+(a config file open in some other process).
 
 ### Process tuning
 
