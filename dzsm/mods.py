@@ -428,6 +428,59 @@ def scan_for_mods(config: Config, directory: Path) -> list[LocalCandidate]:
     ]
 
 
+def local_copy(
+    config: Config,
+    state: State,
+    mod_name: str,
+    target_name: str,
+    *,
+    instance_name: str | None = None,
+) -> tuple[Path, int | None]:
+    """Fork a mod's files into localmods/<target_name>/, returning (path, source version).
+
+    For editing a mod's contents — a types.xml inside a map mod, a config the author left
+    in the PBO-adjacent tree — without steamcmd overwriting the change on the next update.
+    The copy is a local mod (spec §9): unversioned, never downloaded, never swept.
+
+    The source is the version the instance is *actually running* where one is pinned,
+    rather than the newest cached one. Copying files the admin has not seen would be a
+    surprising thing for a button labelled "make a local copy" to do, and the newest
+    cached version is frequently one that has been downloaded but not yet activated.
+
+    The version is returned rather than recorded in the config: once forked, the copy has
+    no relationship to the Workshop item and must not be mistaken for a pin to it.
+    """
+    mod = config.mods.get(mod_name)
+    if mod is None:
+        raise ModCacheError(f"no mod named {mod_name!r}")
+
+    source_version: int | None = None
+    if isinstance(mod, WorkshopMod):
+        pinned = state.pins.get(instance_name or "", {}).get(mod_name)
+        source_version = pinned if pinned is not None else state.latest_version(mod.workshop_id)
+        if source_version is None:
+            raise ModCacheError(
+                f"{mod_name!r} has no cached version to copy — run `dzsm mods update` first"
+            )
+        source = config.version_dir(mod.workshop_id, source_version)
+    else:
+        source = mod.path
+
+    if not source.is_dir():
+        raise ModCacheError(f"{mod_name!r} source files are missing: {source}")
+
+    destination = config.localmods_dir / target_name
+    if destination.exists():
+        raise ModCacheError(f"{destination} already exists; pick another name")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Always a real copy, never config.snapshot_strategy. Hardlinks would make every edit
+    # to the fork an edit to the cached version it came from — the exact thing this exists
+    # to avoid, and it would corrupt a snapshot other instances are running.
+    promote_tree(source, destination, strategy="copy")
+    return destination, source_version
+
+
 def unused_mods(
     config: Config, state: State, *, include_kept: bool = False
 ) -> list[UnusedMod]:

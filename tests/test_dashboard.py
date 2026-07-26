@@ -74,10 +74,51 @@ def test_every_path_the_page_fetches_exists(client: TestClient) -> None:
     assert missing == set(), f"dashboard fetches routes that do not exist: {missing}"
 
 
+def _without_comments(html: str) -> str:
+    """Drop JS line comments.
+
+    The file explains the inline-handler bug in prose, quoting the broken markup. Checking
+    the raw text would match that explanation and fail on the comment describing the fix.
+    """
+    return "\n".join(
+        line for line in html.splitlines() if not line.lstrip().startswith("//")
+    )
+
+
+def test_every_button_names_a_handler_that_exists() -> None:
+    """The other half of the dead-button problem: a control wired to a missing action.
+
+    Delegation looks the name up in `actions`, so a typo produces a button that renders,
+    clicks, and does nothing — the same silent failure inline handlers had. Checked
+    statically because there is no runtime to catch it in.
+    """
+    html = _dashboard_html()
+    body = re.search(r"const actions = \{(.*?)\n\};", html, re.DOTALL)
+    assert body, "could not find the actions object"
+    defined = set(re.findall(r"^  (\w+):", body.group(1), re.MULTILINE))
+    used = set(re.findall(r'data-(?:act|change|enter)="(\w+)"', html))
+
+    assert used - defined == set(), f"controls reference undefined actions: {used - defined}"
+
+
+def test_dynamic_values_reach_handlers_as_attributes() -> None:
+    """No handler argument may be built into markup as code.
+
+    `onclick="f(' + JSON.stringify(name) + ')"` renders `onclick="f("CF")"`, which the
+    HTML parser truncates at the second quote. Values go through attr(), which escapes
+    them, and come back via dataset.
+    """
+    code = _without_comments(_dashboard_html())
+
+    assert "JSON.stringify(name)" not in code
+    assert "onclick" not in code
+
+
 @pytest.mark.parametrize(
     "path",
     [
         "/api/instances",
+        "/api/config/global",
         "/api/versions",
         "/api/server",
         "/api/health",
@@ -126,9 +167,27 @@ def test_the_dashboard_is_served_and_self_contained(client: TestClient) -> None:
 
 
 def test_it_names_what_cannot_be_done_from_the_browser(client: TestClient) -> None:
-    """Editing mods and seeding Steam Guard stay in the terminal; the page says so
-    rather than leaving someone hunting for a button."""
+    """Seeding Steam Guard stays in the terminal; the page says so rather than leaving
+    someone hunting for a button.
+
+    Mods and settings used to be listed here too. They are editable from the browser now,
+    so naming them would send people to the file for something the page can do.
+    """
     html = client.get("/").text
 
-    assert "config.toml" in html
     assert "login --interactive" in html
+
+
+def test_the_page_has_no_inline_event_handlers(client: TestClient) -> None:
+    """Every handler is delegated, and every dynamic value goes into a data-* attribute.
+
+    Inline handlers are built by string concatenation, and a value containing a quote —
+    which JSON.stringify emits for every string — terminates the attribute early and
+    leaves a syntax error the browser reports nowhere. That silently killed two buttons.
+    Delegation makes the failure mode impossible, so the absence is worth asserting.
+    """
+    code = _without_comments(client.get("/").text)
+
+    assert not re.search(r"\bon(click|change|input|keydown)\s*=", code), (
+        "inline event handler in dashboard.html; use data-act/data-change/data-enter"
+    )

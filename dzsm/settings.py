@@ -67,6 +67,39 @@ EDITABLE_INSTANCE_FIELDS = frozenset(
 )
 
 
+# Manager-wide settings the UI may change, as dotted paths into the document. Same
+# whitelist reasoning as EDITABLE_INSTANCE_FIELDS, with one addition: `root` is
+# deliberately absent. Every path in the tool derives from it, so changing it through a
+# form would orphan the mod cache, the instances, and the state file all at once, and
+# nothing here moves any of them. That edit belongs in the file, deliberately.
+EDITABLE_GLOBAL_FIELDS = frozenset(
+    {
+        "gc_retention_days",
+        "snapshot_strategy",
+        "download_timeout_seconds",
+        "server_appid",
+        "server_branch",
+        "per_instance_missions",
+        "mission_prefix",
+        "supervise_poll_seconds",
+        "stop_timeout_seconds",
+        "allow_long_root",
+        "api.host",
+        "api.port",
+        "rcon.host",
+        "rcon.timeout_seconds",
+        "rcon.startup_grace_seconds",
+        "rcon.early_warning_lead_seconds",
+        "rcon.early_warning_interval_seconds",
+        "rcon.final_warning_lead_seconds",
+        "rcon.final_warning_interval_seconds",
+        "rcon.warning_message",
+        "rcon.shutdown_via_rcon",
+        "rcon.manage_battleye_config",
+    }
+)
+
+
 class SettingsError(Exception):
     """An edit was rejected. The file on disk is unchanged."""
 
@@ -129,6 +162,48 @@ def apply_instance_patch(
         else:
             table[key] = value
     return document
+
+
+def apply_global_patch(document: TOMLDocument, patch: dict[str, Any]) -> TOMLDocument:
+    """Set manager-wide settings, keyed by dotted path. None removes a key.
+
+    Dotted rather than nested, so the whitelist can name `rcon.timeout_seconds` without
+    also permitting a whole `rcon` table to be replaced wholesale — a nested patch could
+    drop every sibling key in one request, which is not an edit anyone means to make from
+    a form.
+    """
+    unknown = sorted(set(patch) - EDITABLE_GLOBAL_FIELDS)
+    if unknown:
+        raise SettingsError(
+            f"these settings cannot be edited here: {', '.join(unknown)}. "
+            f"Editable: {', '.join(sorted(EDITABLE_GLOBAL_FIELDS))}"
+        )
+
+    for dotted, value in patch.items():
+        head, _, leaf = dotted.rpartition(".")
+        table: Any = document
+        if head:
+            existing = document.get(head)
+            if existing is None:
+                existing = tomlkit.table()
+                document[head] = existing
+            table = existing
+        if value is None:
+            table.pop(leaf, None)
+        else:
+            table[leaf] = value
+    return document
+
+
+def global_values(config: Config) -> dict[str, Any]:
+    """Current values of the editable manager settings, by the same dotted paths."""
+    values: dict[str, Any] = {}
+    for dotted in EDITABLE_GLOBAL_FIELDS:
+        target: Any = config
+        for part in dotted.split("."):
+            target = getattr(target, part)
+        values[dotted] = target
+    return values
 
 
 def mod_config_name(title: str, existing: Collection[str], workshop_id: int) -> str:
@@ -319,6 +394,82 @@ def _drop(table: Any, list_name: str, mod_name: str) -> None:
         return
     while mod_name in list(array):
         array.remove(mod_name)
+
+
+def set_instance_mod(
+    document: TOMLDocument, instance_name: str, mod_name: str, list_name: str
+) -> TOMLDocument:
+    """Put one mod in one of one instance's three lists, leaving other instances alone.
+
+    The single-server counterpart to set_mod_instances: that one answers "which servers
+    load this mod", this one answers "does this server load this mod". Moving between
+    lists is the same operation as adding, since the three are mutually exclusive.
+    """
+    if list_name not in MOD_LISTS:
+        raise SettingsError(f"unknown list {list_name!r}; expected one of {', '.join(MOD_LISTS)}")
+
+    mods = document.get("mods")
+    if mods is None or mod_name not in mods:
+        raise SettingsError(f"no mod named {mod_name!r} in the config")
+
+    table = _instance_table(document, instance_name)
+    for other in MOD_LISTS:
+        if other != list_name:
+            _drop(table, other, mod_name)
+    _ensure(table, list_name, mod_name)
+    return document
+
+
+def remove_mod_from_instance(
+    document: TOMLDocument, instance_name: str, mod_name: str
+) -> TOMLDocument:
+    """Take a mod out of one instance entirely, leaving it configured and downloaded.
+
+    Removes it from all three lists: "this server does not use this mod" has no useful
+    reading in which a keep_mods claim survives, unlike unticking one list in the
+    assignment panel.
+    """
+    table = _instance_table(document, instance_name)
+    for list_name in MOD_LISTS:
+        _drop(table, list_name, mod_name)
+    return document
+
+
+def replace_mod_in_instance(
+    document: TOMLDocument, instance_name: str, old_name: str, new_name: str
+) -> TOMLDocument:
+    """Swap one mod for another in an instance, *at the same position*.
+
+    Position matters: the list is the load order, and a framework has to precede the mods
+    that extend it. Removing and appending would silently move the replacement to the end
+    of the load order, which for something like CF breaks every mod that depends on it.
+    """
+    table = _instance_table(document, instance_name)
+    found = False
+    for list_name in MOD_LISTS:
+        array = table.get(list_name)
+        if array is None:
+            continue
+        names = list(array)
+        if old_name not in names:
+            continue
+        found = True
+        if new_name in names and new_name != old_name:
+            raise SettingsError(
+                f"instance {instance_name!r} already lists {new_name!r} in {list_name}"
+            )
+        # tomlkit arrays support index assignment and preserve surrounding formatting.
+        array[names.index(old_name)] = new_name
+    if not found:
+        raise SettingsError(f"instance {instance_name!r} does not use {old_name!r}")
+    return document
+
+
+def _instance_table(document: TOMLDocument, instance_name: str) -> Any:
+    instances = document.get("instances")
+    if instances is None or instance_name not in instances:
+        raise SettingsError(f"no instance {instance_name!r} in the config")
+    return instances[instance_name]
 
 
 def instances_using(document: TOMLDocument, mod_name: str) -> list[str]:

@@ -42,9 +42,11 @@ from dzsm.instance import InstanceError
 from dzsm.mods import (
     ModCacheError,
     delete_version,
+    local_copy,
     promote_snapshot,
     promote_tree,
     remove_mod,
+    safe_rmtree,
     scan_for_mods,
     unused_mods,
     version_status,
@@ -84,6 +86,20 @@ class AssignMod(BaseModel):
     # inside the class body, so pydantic resolves the sibling `list[str]` annotation
     # against this field's default and fails at import.
     list_name: str = "mods"
+
+
+class InstanceMod(BaseModel):
+    """Which of one instance's three lists a mod belongs in."""
+
+    list_name: str = "mods"
+
+
+class LocalizeMod(BaseModel):
+    """Forking a mod into an editable local copy for one instance."""
+
+    # Omitted derives "<mod>_<instance>", which is what makes two servers' forks of the
+    # same mod distinguishable in a mods list.
+    name: str | None = None
 
 
 class AddLocalMod(BaseModel):
@@ -595,6 +611,121 @@ def create_app(config_path: Path) -> FastAPI:
             "applies_at_next_start": running,
         }
 
+    @app.put("/api/instances/{name}/mods/{mod_name}", dependencies=writes)
+    def set_instance_mod(name: str, mod_name: str, body: InstanceMod) -> dict[str, Any]:
+        """Add a configured mod to one instance, or move it between that instance's lists."""
+        nonlocal config
+        _known_instance(config, name)
+        if mod_name not in config.mods:
+            raise HTTPException(status_code=404, detail=f"no mod named {mod_name!r}")
+
+        try:
+            document = settings.read_document(config_path)
+            settings.set_instance_mod(document, name, mod_name, body.list_name)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        state = current_state()
+        return {
+            "instance": name,
+            "mod": mod_name,
+            "list_name": body.list_name,
+            "applies_at_next_start": runner.is_running(config, state, name),
+        }
+
+    @app.delete("/api/instances/{name}/mods/{mod_name}", dependencies=writes)
+    def unset_instance_mod(name: str, mod_name: str) -> dict[str, Any]:
+        """Take a mod out of one instance. It stays configured and stays downloaded."""
+        nonlocal config
+        _known_instance(config, name)
+
+        try:
+            document = settings.read_document(config_path)
+            settings.remove_mod_from_instance(document, name, mod_name)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        state = current_state()
+        return {
+            "instance": name,
+            "mod": mod_name,
+            "applies_at_next_start": runner.is_running(config, state, name),
+        }
+
+    @app.post("/api/instances/{name}/mods/{mod_name}/localize", dependencies=writes)
+    def localize_instance_mod(
+        name: str, mod_name: str, body: LocalizeMod
+    ) -> dict[str, Any]:
+        """Give one instance its own editable copy of a mod.
+
+        Copies the files this instance is running into localmods/, configures them as a
+        local mod, and swaps the instance over to it *in place* so the load order does not
+        change. The original stays configured for whoever else uses it.
+        """
+        nonlocal config
+        _known_instance(config, name)
+        if mod_name not in config.mods:
+            raise HTTPException(status_code=404, detail=f"no mod named {mod_name!r}")
+
+        target = body.name or settings.local_mod_name(
+            Path(f"{mod_name}_{name}"), set(config.mods)
+        )
+        state = current_state()
+        try:
+            path, version = local_copy(config, state, mod_name, target, instance_name=name)
+        except ModCacheError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        try:
+            document = settings.read_document(config_path)
+            settings.add_local_mod(document, target, path)
+            settings.replace_mod_in_instance(document, name, mod_name, target)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            # The copy is already on disk. Leaving it there orphaned would be a silent
+            # multi-GB leak and would block a retry under the same name, so it goes.
+            safe_rmtree(path)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return {
+            "instance": name,
+            "mod": mod_name,
+            "local_name": target,
+            "path": str(path),
+            "copied_version": version,
+            "applies_at_next_start": runner.is_running(config, state, name),
+        }
+
+    @app.post("/api/config/mods/{name}/localize", dependencies=writes)
+    def localize_mod(name: str, body: LocalizeMod) -> dict[str, Any]:
+        """Fork a mod into a standalone editable copy, not attached to any instance.
+
+        The instance-scoped route swaps one server over to the copy; this one just makes
+        it, for assigning afterwards. Same files, same rules.
+        """
+        nonlocal config
+        if name not in config.mods:
+            raise HTTPException(status_code=404, detail=f"no mod named {name!r}")
+
+        target = body.name or settings.local_mod_name(Path(f"{name}_copy"), set(config.mods))
+        state = current_state()
+        try:
+            path, version = local_copy(config, state, name, target)
+        except ModCacheError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        try:
+            document = settings.read_document(config_path)
+            settings.add_local_mod(document, target, path)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            safe_rmtree(path)
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return {"mod": name, "local_name": target, "path": str(path), "copied_version": version}
+
     @app.delete("/api/config/mods/{name}", dependencies=writes)
     def remove_configured_mod(name: str, force: bool = False) -> dict[str, Any]:
         """Remove a mod from the config.
@@ -646,6 +777,28 @@ def create_app(config_path: Path) -> FastAPI:
             # 422, not 500: the edit is wrong, not the server.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"saved": True, "instances": sorted(config.instances)}
+
+    @app.get("/api/config/global")
+    def get_global_settings() -> dict[str, Any]:
+        """Manager-wide settings and their current values, by dotted path."""
+        return {
+            "values": settings.global_values(config),
+            "editable": sorted(settings.EDITABLE_GLOBAL_FIELDS),
+            "root": str(config.root),
+            "config_path": str(config_path),
+        }
+
+    @app.patch("/api/config/global", dependencies=writes)
+    def patch_global_settings(body: dict[str, Any]) -> dict[str, Any]:
+        """Change manager-wide settings. A null value removes the key, restoring default."""
+        nonlocal config
+        try:
+            document = settings.read_document(config_path)
+            settings.apply_global_patch(document, body)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"saved": True, "values": settings.global_values(config)}
 
     @app.patch("/api/instances/{name}/settings", dependencies=writes)
     def patch_instance(name: str, body: dict[str, Any]) -> dict[str, Any]:

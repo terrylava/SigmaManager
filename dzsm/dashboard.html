@@ -5,16 +5,24 @@
 <title>dzsm</title>
 <style>
  body { font: 14px system-ui, sans-serif; margin: 2rem; background: #111; color: #ddd }
- h1 { font-size: 1.2rem; margin: 0 0 1.5rem; display: flex; gap: 1rem; align-items: baseline }
+ h1 { font-size: 1.2rem; margin: 0 0 1.5rem; display: flex; gap: 1rem; align-items: baseline;
+      flex-wrap: wrap }
  h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .05em;
       color: #888; margin: 2rem 0 .5rem }
  table { border-collapse: collapse; width: 100% }
- td, th { text-align: left; padding: .45rem .8rem .45rem 0; border-bottom: 1px solid #262626 }
+ td, th { text-align: left; padding: .45rem .8rem .45rem 0; border-bottom: 1px solid #262626;
+          vertical-align: top }
  th { color: #888; font-weight: 500 }
  .run { color: #4ade80 } .stop { color: #777 } .warn { color: #fbbf24 }
  .held { color: #22d3ee } .err { color: #f87171 }
  code { color: #93c5fd }
- .note { color: #666; margin-top: 2rem; font-size: .85rem }
+ a { color: #93c5fd; text-decoration: none }
+ a:hover { text-decoration: underline }
+ nav { display: flex; gap: 1rem; font-size: .9rem }
+ nav a { color: #888; padding-bottom: .1rem; border-bottom: 2px solid transparent }
+ nav a.on { color: #ddd; border-bottom-color: #2f6f4f }
+ .note { color: #666; font-size: .85rem }
+ p.note { margin-top: 2rem }
  button { font: inherit; background: #1e1e1e; color: #ddd; border: 1px solid #3a3a3a;
           border-radius: 4px; padding: .25rem .7rem; cursor: pointer; margin-right: .3rem }
  button:hover:not(:disabled) { background: #2a2a2a; border-color: #555 }
@@ -36,11 +44,13 @@
           background: #161616 }
  .panel h3 { margin: 0 0 .8rem; font-size: .9rem; color: #bbb }
  .field { display: flex; gap: .6rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap }
- .field > label:first-child { width: 9rem; color: #888 }
+ .field > label:first-child { width: 12rem; color: #888; flex: none }
  .cores { display: flex; flex-wrap: wrap; gap: .35rem; max-width: 40rem }
  .cores label { border: 1px solid #333; border-radius: 4px; padding: .1rem .45rem;
                 cursor: pointer; user-select: none; font-variant-numeric: tabular-nums }
- .cores label.on { border-color: #2f6f4f; color: #4ade80; background: #16281c }
+ /* :has() keeps the tick state purely declarative — the alternative was an inline
+    onchange on every core, which is exactly the pattern this file no longer uses. */
+ .cores label:has(input:checked) { border-color: #2f6f4f; color: #4ade80; background: #16281c }
  /* Hidden visually but still focusable and still in the accessibility tree.
     display:none would drop it out of the tab order entirely. */
  .cores input { position: absolute; opacity: 0; width: 1px; height: 1px }
@@ -63,38 +73,40 @@
  .hit .meta { color: #666; font-size: .8rem }
  .hit .act { flex: none; text-align: right }
  .targets label { display: block; color: #ccc; font-size: .85rem }
+ .head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; margin-bottom: 1rem }
+ .head h2 { margin: 0; font-size: 1.1rem; text-transform: none; letter-spacing: 0; color: #ddd }
 </style>
 </head>
 <body>
-<h1>dzsm <span class="note" id="root"></span></h1>
+<h1>dzsm
+  <nav id="nav"></nav>
+  <span class="note" id="root"></span>
+</h1>
 
 <div id="msg"></div>
 <div id="jobs"></div>
 <div id="c">loading&hellip;</div>
 
-<p class="note">
-  Refreshes every few seconds. Adding or removing mods and instances is done in
-  <code>config.toml</code>; Steam Guard is seeded once with
-  <code>dzsm login --interactive</code>.
-</p>
+<p class="note" id="foot"></p>
 
 <script>
+// Every dynamic value below is interpolated into a data-* attribute and read back through
+// element.dataset, never into inline handler source. Building `onclick="f(' + value + ')"`
+// is what broke the mod buttons: JSON.stringify emits double quotes, which terminate the
+// attribute early and leave a syntax error the browser reports nowhere. Delegation makes
+// that class of bug impossible — esc() covers the quote, and the value never becomes code.
 const esc = s => String(s).replace(/[&<>"]/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mib = b => (b / 1048576).toFixed(1) + ' MiB';
 const age = d => d == null ? '?' : d.toFixed(1) + 'd';
+const attr = (name, value) => ' ' + name + '="' + esc(value) + '"';
 
 let busy = false;
 let jobs = [];
+let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null};
 
-function token() {
-  return sessionStorage.getItem('dzsm-token') || '';
-}
-
-function headers() {
-  const t = token();
-  return t ? {'X-DZSM-Token': t} : {};
-}
+function token() { return sessionStorage.getItem('dzsm-token') || ''; }
+function headers() { const t = token(); return t ? {'X-DZSM-Token': t} : {}; }
 
 function say(text, bad) {
   const el = document.getElementById('msg');
@@ -110,19 +122,13 @@ async function post(path, label) {
   try {
     const r = await fetch(path, {method: 'POST', headers: headers()});
     const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      // FastAPI puts the reason in `detail`; the CLI's refusals come through verbatim.
-      say(body.detail || (label + ' failed (' + r.status + ')'), true);
-    } else if (body.id) {
-      say(label + ' started');           // 202 with a job id
-    } else {
-      say(label + ' done');
-    }
+    if (!r.ok) say(body.detail || (label + ' failed (' + r.status + ')'), true);
+    else if (body.id) say(label + ' started');       // 202 with a job id
+    else say(label + ' done');
   } catch (e) {
     say(label + ' failed: ' + e, true);
   } finally {
-    busy = false;
-    load();
+    busy = false; painted = ''; load();
   }
 }
 
@@ -134,90 +140,618 @@ async function send(method, path, body, label) {
     const r = await fetch(path, {
       method: method,
       headers: Object.assign({'Content-Type': 'application/json'}, headers()),
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
     const out = await r.json().catch(() => ({}));
     if (!r.ok) { say(out.detail || (label + ' failed (' + r.status + ')'), true); return false; }
-    say(label + (out.applies_at_next_start ? ' saved - applies at the next start' : ' saved'));
-    return true;
+    // The label is the whole sentence, not a subject the caller appends "saved" to: a
+    // removal reported as "Expansion removed from chernarus saved" reads like a bug.
+    const pending = out.applies_at_next_start;
+    const later = Array.isArray(pending) ? pending.length : !!pending;
+    say(label + (later ? ' - applies at the next start' : ''));
+    return out;
   } catch (e) {
     say(label + ' failed: ' + e, true);
     return false;
   } finally {
-    busy = false;
-    painted = '';          // force a repaint: what we just saved changed the data
-    load();
+    busy = false; dirty = false; painted = ''; load();
   }
 }
 
-let editing = null;        // instance name whose settings panel is open
-let cfgEditing = null;     // instance name whose serverDZ.cfg is open
+// --- routing -------------------------------------------------------------------
+// Hash routing rather than paths: the dashboard is one static file served at /, so a
+// real path would 404 on reload.
 
-const act = {
-  start: n => post('api/instances/' + encodeURIComponent(n) + '/start', 'Start ' + n),
-  stop: n => post('api/instances/' + encodeURIComponent(n) + '/stop', 'Stop ' + n),
-  restart: n => post('api/instances/' + encodeURIComponent(n) + '/restart', 'Restart ' + n),
+function route() {
+  const h = decodeURIComponent(location.hash.replace(/^#/, ''));
+  if (h.startsWith('/server/')) return {page: 'server', name: h.slice('/server/'.length)};
+  if (h === '/mods') return {page: 'mods'};
+  return {page: 'overview'};
+}
+
+window.addEventListener('hashchange', () => {
+  cfgEditing = null; assigning = null; dirty = false; painted = ''; render();
+});
+
+function navBar(view) {
+  const link = (href, label, on) =>
+    '<a href="' + href + '"' + (on ? ' class="on"' : '') + '>' + label + '</a>';
+  return link('#/', 'Overview', view.page === 'overview')
+       + link('#/mods', 'Mods', view.page === 'mods')
+       + (view.page === 'server'
+          ? '<a href="#/server/' + encodeURIComponent(view.name) + '" class="on">'
+            + esc(view.name) + '</a>'
+          : '');
+}
+
+// --- event delegation ----------------------------------------------------------
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-act]');
+  if (!el || el.disabled) return;
+  const fn = actions[el.dataset.act];
+  if (!fn) { say('no such action: ' + el.dataset.act, true); return; }
+  e.preventDefault();
+  fn(el.dataset, el);
+});
+
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-change]');
+  if (!el) return;
+  const fn = actions[el.dataset.change];
+  if (fn) fn(el.dataset, el);
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const el = e.target.closest('[data-enter]');
+  if (!el) return;
+  const fn = actions[el.dataset.enter];
+  if (fn) { e.preventDefault(); fn(el.dataset, el); }
+});
+
+// A form panel with unsaved edits must never be repainted out from under the person
+// typing in it. Scoped to [data-form] so search boxes and the token field, which are
+// preserved separately, do not freeze the page's live updates.
+let dirty = false;
+document.addEventListener('input', e => {
+  if (e.target.closest('[data-form]')) dirty = true;
+});
+
+const val = id => {
+  const el = document.getElementById(id);
+  return el ? el.value.trim() : '';
+};
+const num = id => { const v = val(id); return v === '' ? null : +v; };
+const checked = id => {
+  const el = document.getElementById(id);
+  return el ? el.checked : false;
+};
+const ticked = sel => [...document.querySelectorAll(sel + ' input:checked')].map(e => e.value);
+
+// --- actions -------------------------------------------------------------------
+
+const actions = {
+  start: d => post('api/instances/' + encodeURIComponent(d.name) + '/start', 'Start ' + d.name),
+  stop: d => post('api/instances/' + encodeURIComponent(d.name) + '/stop', 'Stop ' + d.name),
+  restart: d => post('api/instances/' + encodeURIComponent(d.name) + '/restart',
+                     'Restart ' + d.name),
   modsCheck: () => post('api/mods/check', 'Check for mod updates'),
   modsUpdate: () => post('api/mods/update', 'Mod update'),
   serverUpdate: () => post('api/server/update', 'Server app update'),
 
-  edit: n => { editing = (editing === n ? null : n); cfgEditing = null; painted = ''; render(); },
+  // --- manager settings (overview) ---
 
-  save: async n => {
-    const cores = [...document.querySelectorAll('.cores input:checked')].map(e => +e.value);
-    const num = id => {
-      const v = document.getElementById(id).value.trim();
-      return v === '' ? null : +v;
-    };
-    const sel = id => document.getElementById(id).value || null;
+  saveGlobal: async () => {
+    const current = last.global.values;
+    const patch = {};
+    for (const f of GLOBAL_FIELDS) {
+      const id = 'g-' + f.k.replace(/\./g, '-');
+      const v = f.t === 'bool' ? checked(id)
+              : f.t === 'num' ? num(id)
+              : (val(id) || null);
+      // Only what actually changed. Sending every field would write each one explicitly,
+      // turning fifteen defaults into fifteen frozen settings — a later change to a
+      // default would then never reach a config whose owner once clicked Save.
+      if (v !== (current[f.k] === undefined ? null : current[f.k])) patch[f.k] = v;
+    }
+    if (!Object.keys(patch).length) { say('Manager settings unchanged'); return; }
+    await send('PATCH', 'api/config/global', patch, 'Manager settings saved');
+  },
+
+  // --- one server ---
+
+  saveLaunch: async d => {
+    const cores = ticked('.cores');
     const patch = {
       // null removes the key and restores the default, which is what "all cores" and
       // "leave the priority alone" actually mean.
-      cpu_affinity: cores.length ? cores : null,
-      priority: sel('f-priority'),
+      cpu_affinity: cores.length ? cores.map(Number) : null,
+      priority: val('f-priority') || null,
       cpu_count: num('f-cpucount'),
       restart_after_hours: num('f-hours'),
-      dologs: document.getElementById('f-dologs').checked,
-      adminlog: document.getElementById('f-adminlog').checked,
-      netlog: document.getElementById('f-netlog').checked,
-      freezecheck: document.getElementById('f-freezecheck').checked,
+      server_executable: val('f-exe') || null,
+      dologs: checked('f-dologs'),
+      adminlog: checked('f-adminlog'),
+      netlog: checked('f-netlog'),
+      freezecheck: checked('f-freezecheck'),
     };
-    if (await send('PATCH', 'api/instances/' + encodeURIComponent(n) + '/settings',
-                   patch, 'Settings for ' + n)) {
-      editing = null;
-    }
+    await send('PATCH', 'api/instances/' + encodeURIComponent(d.name) + '/settings',
+               patch, 'Settings for ' + d.name + ' saved');
   },
 
-  editCfg: async n => {
-    if (cfgEditing === n) { cfgEditing = null; painted = ''; render(); return; }
+  editCfg: async d => {
+    if (cfgEditing === d.name) { cfgEditing = null; painted = ''; render(); return; }
     try {
-      const r = await fetch('api/instances/' + encodeURIComponent(n) + '/serverdz');
+      const r = await fetch('api/instances/' + encodeURIComponent(d.name) + '/serverdz');
       const out = await r.json();
       if (!r.ok) { say(out.detail || 'could not read serverDZ.cfg', true); return; }
-      cfgEditing = n; editing = null; painted = ''; render();
+      cfgEditing = d.name; painted = ''; render();
       document.getElementById('cfgtext').value = out.text;
       document.getElementById('cfgpath').textContent = out.path;
     } catch (e) { say('could not read serverDZ.cfg: ' + e, true); }
   },
 
-  saveCfg: async n => {
+  saveCfg: async d => {
     const text = document.getElementById('cfgtext').value;
-    if (await send('PUT', 'api/instances/' + encodeURIComponent(n) + '/serverdz',
-                   {text: text}, 'serverDZ.cfg for ' + n)) {
+    if (await send('PUT', 'api/instances/' + encodeURIComponent(d.name) + '/serverdz',
+                   {text: text}, 'serverDZ.cfg for ' + d.name + ' saved')) {
       cfgEditing = null;
     }
   },
+
+  // --- a server's mods ---
+
+  instAddMod: async d => {
+    const mod = val('add-mod');
+    if (!mod) { say('pick a mod to add', true); return; }
+    await send('PUT', 'api/instances/' + encodeURIComponent(d.name) + '/mods/'
+               + encodeURIComponent(mod), {list_name: val('add-list') || 'mods'},
+               'Added ' + mod + ' to ' + d.name);
+  },
+
+  instSetList: async (d, el) => {
+    await send('PUT', 'api/instances/' + encodeURIComponent(d.name) + '/mods/'
+               + encodeURIComponent(d.mod), {list_name: el.value},
+               d.mod + ' on ' + d.name + ' is now ' + LIST_LABELS[el.value]);
+  },
+
+  instRemoveMod: async d => {
+    if (!confirm('Remove "' + d.mod + '" from ' + d.name + '?\n\nIt stays configured and '
+                 + 'stays downloaded — this only takes it out of this server.')) return;
+    await send('DELETE', 'api/instances/' + encodeURIComponent(d.name) + '/mods/'
+               + encodeURIComponent(d.mod), undefined, 'Removed ' + d.mod + ' from ' + d.name);
+  },
+
+  instLocalize: async d => {
+    const suggested = d.mod + '_' + d.name;
+    const name = prompt(
+      'Copy "' + d.mod + '" into localmods/ and switch ' + d.name + ' over to the copy?\n\n'
+      + 'The copy is never updated by Steam, so it is yours to edit. Other servers keep '
+      + 'using the original.\n\nName for the copy:', suggested);
+    if (!name) return;
+    const out = await send('POST', 'api/instances/' + encodeURIComponent(d.name) + '/mods/'
+                           + encodeURIComponent(d.mod) + '/localize', {name: name},
+                           'Local copy of ' + d.mod + ' made');
+    if (out) say('Copied ' + d.mod + ' to ' + out.path
+                 + (out.copied_version ? ' (from version ' + out.copied_version + ')' : ''));
+  },
+
+  // --- all mods ---
+
+  assign: d => { assigning = (assigning === d.mod ? null : d.mod); painted = ''; render(); },
+
+  saveAssign: async d => {
+    if (await send('PATCH', 'api/config/mods/' + encodeURIComponent(d.mod) + '/instances',
+                   {instances: ticked('.atargets'), list_name: val('a-list')},
+                   'Assignment for ' + d.mod + ' saved')) {
+      assigning = null;
+    }
+  },
+
+  localizeMod: async d => {
+    const name = prompt(
+      'Make an editable local copy of "' + d.mod + '"?\n\nIt is added as a separate mod, '
+      + 'not attached to any server — assign it afterwards.\n\nName for the copy:',
+      d.mod + '_copy');
+    if (!name) return;
+    const out = await send('POST', 'api/config/mods/' + encodeURIComponent(d.mod) + '/localize',
+                           {name: name}, 'Local copy of ' + d.mod + ' made');
+    if (out) say('Copied ' + d.mod + ' to ' + out.path);
+  },
+
+  removeMod: async d => {
+    const users = d.users ? d.users.split(',').filter(Boolean) : [];
+    const warning = users.length
+      ? '\n\nIt is used by ' + users.join(', ') + ', so it will be taken out of their '
+        + 'load orders too.'
+      : '';
+    if (!confirm('Remove "' + d.mod + '" from the config?' + warning
+        + '\n\nDownloaded files are kept — remove those separately.')) return;
+    const out = await send('DELETE', 'api/config/mods/' + encodeURIComponent(d.mod)
+                           + (users.length ? '?force=true' : ''), undefined,
+                           'Removed ' + d.mod + ' from the config');
+    if (out) {
+      const kept = (out.cached_versions || []).length;
+      if (kept) say('Removed ' + d.mod + ' (' + kept + ' cached version(s) kept)');
+    }
+  },
+
+  // --- workshop and local scan ---
+
+  search: searchWorkshop,
+  addWorkshop: d => addMod(d.id),
+  scan: scanLocal,
+  addLocal: d => addLocal(d.path),
 };
+
+// --- overview ------------------------------------------------------------------
+
+// Declared rather than hand-written so the form, the collector, and the whitelist cannot
+// drift apart. `k` is the dotted path the API expects.
+const GLOBAL_FIELDS = [
+  {k: 'gc_retention_days', t: 'num', label: 'Keep unused versions',
+   note: 'days before automatic deletion; blank never deletes anything'},
+  {k: 'download_timeout_seconds', t: 'num', label: 'Download timeout', note: 'seconds'},
+  {k: 'supervise_poll_seconds', t: 'num', label: 'Supervise poll', note: 'seconds'},
+  {k: 'stop_timeout_seconds', t: 'num', label: 'Stop timeout',
+   note: 'seconds before a server is killed; DayZ flushes persistence on exit'},
+  {k: 'server_branch', t: 'text', label: 'Server branch', note: 'blank = public/stable'},
+  {k: 'mission_prefix', t: 'text', label: 'Mission prefix'},
+  {k: 'per_instance_missions', t: 'bool', label: 'Per-instance missions',
+   note: 'each server gets its own economy and persistence'},
+  {k: 'rcon.startup_grace_seconds', t: 'num', label: 'RCON startup grace',
+   note: 'seconds before RCON is expected to answer'},
+  {k: 'rcon.early_warning_lead_seconds', t: 'num', label: 'Warn from',
+   note: 'seconds before a restart'},
+  {k: 'rcon.early_warning_interval_seconds', t: 'num', label: 'Warn every', note: 'seconds'},
+  {k: 'rcon.final_warning_lead_seconds', t: 'num', label: 'Final warnings from',
+   note: 'seconds before a restart'},
+  {k: 'rcon.final_warning_interval_seconds', t: 'num', label: 'Final warn every',
+   note: 'seconds'},
+  {k: 'rcon.warning_message', t: 'text', label: 'Warning message',
+   note: '{remaining} becomes "2 minutes"'},
+  {k: 'rcon.shutdown_via_rcon', t: 'bool', label: 'Shut down via RCON',
+   note: 'lets DayZ close on its own terms instead of being signalled'},
+  {k: 'rcon.manage_battleye_config', t: 'bool', label: 'Manage BattlEye config',
+   note: 'generates an RCON password when an instance has none'},
+];
+
+function globalField(f, values) {
+  const id = 'g-' + f.k.replace(/\./g, '-');
+  const v = values[f.k];
+  let input;
+  if (f.t === 'bool') {
+    input = '<input type="checkbox"' + attr('id', id) + (v ? ' checked' : '') + '>';
+  } else if (f.t === 'num') {
+    input = '<input type="number"' + attr('id', id) + ' style="width:8rem"'
+          + attr('value', v == null ? '' : v) + '>';
+  } else {
+    input = '<input type="text"' + attr('id', id) + ' style="width:18rem"'
+          + attr('value', v == null ? '' : v) + '>';
+  }
+  return '<div class="field"><label>' + esc(f.label) + '</label>' + input
+    + (f.note ? '<span class="note">' + esc(f.note) + '</span>' : '') + '</div>';
+}
+
+function managerPanel() {
+  if (!last.global) return '';
+  return '<h2>Manager settings</h2><div class="panel" data-form>'
+    + GLOBAL_FIELDS.map(f => globalField(f, last.global.values)).join('')
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="saveGlobal"' + (busy ? ' disabled' : '') + '>Save</button>'
+      + '<span class="note">written to ' + esc(last.global.config_path)
+      + ' &mdash; anything not here is edited in the file</span></div>'
+    + '</div>';
+}
+
+function overviewRow(i) {
+  const state = i.running
+    ? '<span class="run">running</span>'
+    : (i.held ? '<span class="held">held down</span>' : '<span class="stop">stopped</span>');
+  const d = busy ? ' disabled' : '';
+  const buttons = (i.running
+    ? '<button class="danger" data-act="stop"' + attr('data-name', i.name) + d + '>Stop</button>'
+      + '<button data-act="restart"' + attr('data-name', i.name) + d + '>Restart</button>'
+    : '<button class="primary" data-act="start"' + attr('data-name', i.name) + d
+      + '>Start</button>');
+  const counts = [];
+  if (i.mods.length) counts.push(i.mods.length + ' mods');
+  if (i.server_mods.length) counts.push(i.server_mods.length + ' server-only');
+  if (i.keep_mods.length) counts.push(i.keep_mods.length + ' kept');
+  return '<tr>'
+    + '<td><a href="#/server/' + encodeURIComponent(i.name) + '">' + esc(i.name) + '</a>'
+    + '<td>' + state
+    + '<td>' + i.port + (i.rcon_port ? ' <span class="note">rcon ' + i.rcon_port + '</span>' : '')
+    + '<td><span class="note">' + (counts.join(' &middot; ') || '&mdash;') + '</span>'
+    + '<td>' + esc(i.next_restart ? i.next_restart.replace('T', ' ').slice(0, 16) : 'no schedule')
+    + '<td>' + buttons
+    + '</tr>';
+}
+
+function renderOverview() {
+  const d = busy ? ' disabled' : '';
+  let h = '<div class="bar">'
+    + '<button data-act="modsCheck"' + d + '>Check for mod updates</button>'
+    + '<button data-act="modsUpdate"' + d + '>Update mods</button>'
+    + '<button data-act="serverUpdate"' + d + '>Update server app</button>'
+    + '<input id="token" type="password" placeholder="API token (only if set)">'
+    + '</div>';
+
+  h += '<h2>Servers</h2><table>'
+    + '<tr><th>Name<th>State<th>Ports<th>Mods<th>Next restart<th></tr>'
+    + last.instances.map(overviewRow).join('');
+  if (!last.instances.length) h += '<tr><td colspan="6">none configured</tr>';
+  h += '</table>';
+
+  h += managerPanel();
+
+  h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
+  h += last.server.builds.map(b =>
+    '<tr><td><code>' + esc(b) + '</code><td>' + (b === last.server.active ? 'newest' : '') + '</tr>'
+  ).join('');
+  if (!last.server.builds.length) h += '<tr><td colspan="2">none downloaded</tr>';
+  h += '</table>';
+  if (last.server.server_app_path) {
+    h += '<p class="note">Instances use <code>' + esc(last.server.server_app_path) + '</code></p>';
+  }
+  return h;
+}
+
+// --- one server ----------------------------------------------------------------
+
+let cfgEditing = null;
+
+function launchPanel(i) {
+  const cores = [];
+  const total = last.server.cpu_count || 0;
+  for (let c = 0; c < total; c++) {
+    const on = i.cpu_affinity && i.cpu_affinity.includes(c);
+    cores.push('<label><input type="checkbox"' + attr('value', c) + (on ? ' checked' : '')
+      + '>' + c + '</label>');
+  }
+  const opt = (v, label) =>
+    '<option' + attr('value', v) + (i.priority === v ? ' selected' : '') + '>' + label + '</option>';
+  const flag = (id, on, label) =>
+    '<label><input type="checkbox" id="f-' + id + '"' + (on ? ' checked' : '') + '> '
+    + label + '</label>';
+
+  return '<h2>Launch settings</h2><div class="panel" data-form>'
+    + '<div class="field"><label>CPU cores</label><div class="cores">'
+      + (total ? cores.join('') : '<span class="note">unknown</span>')
+      + '</div></div>'
+    + '<div class="field"><label>&nbsp;</label><span class="note">'
+      + 'none selected = every core</span></div>'
+    + '<div class="field"><label>Priority</label><select id="f-priority">'
+      + '<option value="">(leave alone)</option>'
+      + opt('idle', 'idle') + opt('below_normal', 'below normal') + opt('normal', 'normal')
+      + opt('above_normal', 'above normal') + opt('high', 'high') + opt('realtime', 'realtime')
+      + '</select><span class="note">raising it usually needs elevation</span></div>'
+    + '<div class="field"><label>-cpuCount</label>'
+      + '<input type="number" id="f-cpucount" min="1" style="width:5rem"'
+      + attr('value', i.cpu_count == null ? '' : i.cpu_count) + '>'
+      + '<span class="note">engine threads, separate from affinity</span></div>'
+    + '<div class="field"><label>Restart after</label>'
+      + '<input type="number" id="f-hours" min="0" step="0.5" style="width:5rem"'
+      + attr('value', i.restart_after_hours == null ? '' : i.restart_after_hours) + '>'
+      + '<span class="note">hours from start; blank disables</span></div>'
+    + '<div class="field"><label>Server executable</label>'
+      + '<input type="text" id="f-exe" style="width:14rem"'
+      + attr('value', i.server_executable || '')
+      + ' placeholder="DayZServer_x64.exe">'
+      + '<span class="note">e.g. DayZDiag_x64.exe for the diagnostic build</span></div>'
+    + '<div class="field flags"><label>Flags</label><div>'
+      + flag('dologs', i.dologs, '-dologs') + flag('adminlog', i.adminlog, '-adminlog')
+      + flag('netlog', i.netlog, '-netlog') + flag('freezecheck', i.freezecheck, '-freezecheck')
+      + '</div></div>'
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="saveLaunch"' + attr('data-name', i.name)
+      + (busy ? ' disabled' : '') + '>Save</button>'
+      + '<span class="note">applies at the next start</span></div>'
+    + '</div>';
+}
+
+function cfgPanel(name) {
+  return '<div class="panel" data-form>'
+    + '<h3>serverDZ.cfg &mdash; <span class="note" id="cfgpath"></span></h3>'
+    + '<textarea id="cfgtext" spellcheck="false"></textarea>'
+    + '<div class="field" style="margin-top:.6rem"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="saveCfg"' + attr('data-name', name) + '>Save</button>'
+      + '<button data-act="editCfg"' + attr('data-name', name) + '>Cancel</button>'
+      + '<span class="note">not validated &mdash; it is the engine\'s format, so anything '
+      + 'it understands is allowed</span></div>'
+    + '</div>';
+}
+
+const LIST_LABELS = {mods: 'loaded', server_mods: 'server only', keep_mods: 'kept, not loaded'};
+
+function listContaining(instance, name) {
+  if ((instance.mods || []).includes(name)) return 'mods';
+  if ((instance.server_mods || []).includes(name)) return 'server_mods';
+  if ((instance.keep_mods || []).includes(name)) return 'keep_mods';
+  return null;
+}
+
+function instanceModRow(i, name, list, order) {
+  const mod = last.mods.find(m => m.name === name) || {name: name, kind: '?'};
+  const d = busy ? ' disabled' : '';
+  const where = mod.kind === 'local'
+    ? '<code>local</code> <span class="note">' + esc(mod.path || '') + '</span>'
+    : '<code>' + esc(mod.workshop_id) + '</code>';
+  const opt = v => '<option' + attr('value', v) + (v === list ? ' selected' : '') + '>'
+    + LIST_LABELS[v] + '</option>';
+  const dataset = attr('data-name', i.name) + attr('data-mod', name);
+  return '<tr>'
+    + '<td>' + (order == null ? '' : '<span class="note">' + order + '.</span> ') + esc(name)
+    + '<td>' + where
+    + '<td><select data-change="instSetList"' + dataset + d + '>'
+      + opt('mods') + opt('server_mods') + opt('keep_mods') + '</select>'
+    + '<td><button data-act="instLocalize"' + dataset + d + '>Local copy</button>'
+      + '<button class="danger" data-act="instRemoveMod"' + dataset + d + '>Remove</button>'
+    + '</tr>';
+}
+
+function instanceModsPanel(i) {
+  let h = '<h2>Mods on this server</h2><table>'
+    + '<tr><th>Mod<th>Source<th>Loaded as<th></tr>';
+  // Load order first and numbered, because for -mod= the order is the whole point;
+  // server-only and kept mods follow, where it does not matter.
+  i.mods.forEach((n, idx) => { h += instanceModRow(i, n, 'mods', idx + 1); });
+  i.server_mods.forEach(n => { h += instanceModRow(i, n, 'server_mods', null); });
+  i.keep_mods.forEach(n => { h += instanceModRow(i, n, 'keep_mods', null); });
+  const total = i.mods.length + i.server_mods.length + i.keep_mods.length;
+  if (!total) h += '<tr><td colspan="4">no mods on this server</tr>';
+  h += '</table>';
+
+  const available = last.mods.filter(m => !listContaining(i, m.name));
+  const d = busy ? ' disabled' : '';
+  h += '<div class="panel"><h3>Add a configured mod</h3><div class="field">'
+    + '<label>Mod</label><select id="add-mod"' + (available.length ? '' : ' disabled') + '>'
+      + available.map(m => '<option' + attr('value', m.name) + '>' + esc(m.name) + '</option>').join('')
+      + (available.length ? '' : '<option value="">every configured mod is already here</option>')
+    + '</select>'
+    + '<select id="add-list"><option value="mods">loaded</option>'
+      + '<option value="server_mods">server only</option>'
+      + '<option value="keep_mods">kept, not loaded</option></select>'
+    + '<button class="primary" data-act="instAddMod"' + attr('data-name', i.name)
+      + (available.length ? d : ' disabled') + '>Add</button>'
+    + '</div>'
+    + '<p class="note">Appended to the end of the load order. New mods come from '
+      + '<a href="#/mods">Mods</a>.</p></div>';
+  return h;
+}
+
+function renderServer(name) {
+  const i = last.instances.find(x => x.name === name);
+  if (!i) {
+    return '<p class="err">No server named ' + esc(name) + '.</p>'
+      + '<p><a href="#/">Back to the overview</a></p>';
+  }
+  const d = busy ? ' disabled' : '';
+  const state = i.running
+    ? '<span class="run">running</span>'
+    : (i.held ? '<span class="held">held down</span>' : '<span class="stop">stopped</span>');
+  const pins = Object.entries(i.pins).map(([k, v]) => k + '=' + v).join(', ');
+
+  let h = '<div class="head"><h2>' + esc(i.name) + '</h2>' + state
+    + '<span class="note">port ' + i.port
+    + (i.rcon_port ? ' &middot; rcon ' + i.rcon_port : '')
+    + (i.server_build ? ' &middot; build ' + esc(i.server_build) : '')
+    + (i.isolated_server ? ' &middot; isolated' : '') + '</span>'
+    + '<span style="flex:1"></span>'
+    + (i.running
+       ? '<button class="danger" data-act="stop"' + attr('data-name', i.name) + d + '>Stop</button>'
+         + '<button data-act="restart"' + attr('data-name', i.name) + d + '>Restart</button>'
+       : '<button class="primary" data-act="start"' + attr('data-name', i.name) + d
+         + '>Start</button>')
+    + '<button data-act="editCfg"' + attr('data-name', i.name) + d + '>serverDZ.cfg</button>'
+    + '</div>';
+
+  h += '<p class="note">Next restart: '
+    + esc(i.next_restart ? i.next_restart.replace('T', ' ').slice(0, 16) : 'no schedule')
+    + (pins ? ' &middot; running <code>' + esc(pins) + '</code>' : '') + '</p>';
+
+  if (cfgEditing === i.name) h += cfgPanel(i.name);
+  h += launchPanel(i);
+  h += instanceModsPanel(i);
+  return h;
+}
+
+// --- all mods ------------------------------------------------------------------
+
+let assigning = null;
+
+function usersOf(name) {
+  return last.instances.filter(i => listContaining(i, name)).map(i => i.name);
+}
+
+function assignPanel(name) {
+  // Preselect the list the mod is already in somewhere, so opening the panel and saving
+  // without touching anything is a no-op rather than a silent move to "mods".
+  const current = last.instances.map(i => listContaining(i, name)).find(Boolean) || 'mods';
+  const opt = (v, label) =>
+    '<option' + attr('value', v) + (current === v ? ' selected' : '') + '>' + label + '</option>';
+
+  const boxes = last.instances.map(i => {
+    const where = listContaining(i, name);
+    const note = where && where !== current
+      ? ' <span class="note">(currently ' + LIST_LABELS[where] + ')</span>' : '';
+    return '<label><input type="checkbox"' + attr('value', i.name)
+      + (where === current ? ' checked' : '') + '> ' + esc(i.name) + note + '</label>';
+  }).join('');
+
+  return '<div class="panel" data-form><h3>Which servers load ' + esc(name) + '?</h3>'
+    + '<div class="field"><label>As</label><select id="a-list">'
+      + opt('mods', 'loaded (-mod)')
+      + opt('server_mods', 'server only (-serverMod)')
+      + opt('keep_mods', 'kept, not loaded')
+    + '</select></div>'
+    + '<div class="field"><label>Servers</label><div class="targets atargets">' + boxes
+      + (last.instances.length ? '' : '<span class="note">no instances configured</span>')
+      + '</div></div>'
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="saveAssign"' + attr('data-mod', name) + '>Save</button>'
+      + '<button data-act="assign"' + attr('data-mod', name) + '>Cancel</button>'
+      + '<span class="note">unticking removes it from that list only</span></div>'
+    + '</div>';
+}
+
+function modRow(m) {
+  const users = usersOf(m.name);
+  // Which list each one carries it in, since "used by" alone hides a real difference
+  // between loaded, server-only and merely kept.
+  const where = users.length
+    ? users.map(u => {
+        const list = listContaining(last.instances.find(i => i.name === u), m.name);
+        const label = list === 'mods' ? '' : ' <span class="note">(' + LIST_LABELS[list] + ')</span>';
+        return '<a href="#/server/' + encodeURIComponent(u) + '">' + esc(u) + '</a>' + label;
+      }).join(', ')
+    : '<span class="warn">no server uses it</span>';
+  const cached = m.kind === 'local'
+    ? '<span class="note">local</span>'
+    : ((m.cached_versions || []).length
+       ? '<code>' + m.cached_versions[0] + '</code>'
+         + (m.cached_versions.length > 1
+            ? ' <span class="note">+' + (m.cached_versions.length - 1) + '</span>' : '')
+       : '<span class="note">not downloaded</span>');
+  const source = m.kind === 'workshop'
+    ? '<code>' + esc(m.workshop_id) + '</code>'
+    : '<span class="note">' + esc(m.path || '') + '</span>';
+  const d = busy ? ' disabled' : '';
+  return '<tr>'
+    + '<td>' + esc(m.name)
+    + '<td>' + source
+    + '<td>' + cached
+    + '<td>' + where
+    + '<td><button data-act="assign"' + attr('data-mod', m.name) + d + '>Servers</button>'
+      + '<button data-act="localizeMod"' + attr('data-mod', m.name) + d + '>Local copy</button>'
+      + '<button class="danger" data-act="removeMod"' + attr('data-mod', m.name)
+      + attr('data-users', users.join(',')) + d + '>Remove</button>'
+    + '</tr>';
+}
+
+function versionRow(v) {
+  const use = v.pinned_by.length
+    ? '<span class="run">in use by ' + esc(v.pinned_by.join(', ')) + '</span>'
+    : (v.kept_by.length
+        ? '<span class="held">kept by ' + esc(v.kept_by.join(', ')) + '</span>'
+        : '<span class="warn">unused</span>');
+  return '<tr>'
+    + '<td>' + esc(v.mod_name || v.workshop_id)
+    + '<td><code>' + v.version + '</code>'
+    + '<td>' + mib(v.size_bytes)
+    + '<td>' + age(v.age_days)
+    + '<td>' + use + (v.exists ? '' : ' <span class="err">MISSING</span>')
+    + '</tr>';
+}
 
 let hits = null;          // null = the browser has not been used yet
 let hitsTotal = 0;
 let hitsQuery = '';
 let pendingQuery = '';    // survives a repaint, so a background refresh cannot eat it
 
-const WORKSHOP_ID = /(?:id=)?(\d{6,})/;   // bare id, or one pulled out of a Workshop URL
-
 async function searchWorkshop() {
-  const raw = document.getElementById('q').value.trim();
+  const raw = val('q');
   if (!raw) return;
   hitsQuery = raw;
 
@@ -242,163 +776,80 @@ async function searchWorkshop() {
   }
 }
 
-async function removeMod(name, usedBy) {
-  const warning = usedBy.length
-    ? '\n\nIt is used by ' + usedBy.join(', ') + ', so it will be taken out of their '
-      + 'load orders too.'
-    : '';
-  if (!confirm('Remove "' + name + '" from the config?' + warning
-      + '\n\nDownloaded files are kept — remove those separately.')) return;
-
-  const url = 'api/config/mods/' + encodeURIComponent(name) + (usedBy.length ? '?force=true' : '');
-  if (busy) return;
-  busy = true; render();
-  try {
-    const r = await fetch(url, {method: 'DELETE', headers: headers()});
-    const out = await r.json().catch(() => ({}));
-    if (!r.ok) { say(out.detail || 'remove failed', true); }
-    else {
-      const kept = (out.cached_versions || []).length;
-      say('Removed ' + name + (kept ? ' (' + kept + ' cached version(s) kept)' : ''));
-    }
-  } catch (e) {
-    say('remove failed: ' + e, true);
-  } finally {
-    busy = false; painted = ''; load();
-  }
-}
-
 async function addMod(id) {
-  const targets = [...document.querySelectorAll('.targets input:checked')].map(e => e.value);
-  if (await send('POST', 'api/workshop/' + id + '/add', {instances: targets},
-                 'Add mod ' + id)) {
+  if (await send('POST', 'api/workshop/' + id + '/add', {instances: ticked('.wtargets')},
+                 'Added mod ' + id)) {
     hits = null;                       // the results are stale once it is configured
-    document.getElementById('q').value = '';
+    pendingQuery = '';
   }
 }
 
 function hitRow(h) {
   const img = h.preview_url
-    ? '<img src="' + esc(h.preview_url) + '" alt="" loading="lazy">'
+    ? '<img' + attr('src', h.preview_url) + ' alt="" loading="lazy">'
     : '<img alt="">';
   const meta = [];
   if (h.subscriptions) meta.push(h.subscriptions.toLocaleString() + ' subscribers');
   if (h.file_size) meta.push(mib(h.file_size));
-  if (h.time_updated) meta.push('updated ' + new Date(h.time_updated * 1000).toISOString().slice(0, 10));
+  if (h.time_updated) {
+    meta.push('updated ' + new Date(h.time_updated * 1000).toISOString().slice(0, 10));
+  }
   meta.push('id ' + h.workshop_id);
 
   const action = h.configured_as
     ? '<span class="run">added as ' + esc(h.configured_as) + '</span>'
-    : '<button class="primary" onclick="addMod(' + h.workshop_id + ')"'
+    : '<button class="primary" data-act="addWorkshop"' + attr('data-id', h.workshop_id)
       + (busy ? ' disabled' : '') + '>Add</button>';
 
   return '<div class="hit">' + img
     + '<div class="body">'
       + '<div class="title">' + esc(h.title) + '</div>'
       + '<div class="desc">' + esc(h.description) + '</div>'
-      + '<div class="meta">' + esc(meta.join(' &middot; ')).replace(/&amp;middot;/g, '&middot;') + '</div>'
+      + '<div class="meta">' + meta.map(esc).join(' &middot; ') + '</div>'
     + '</div>'
     + '<div class="act">' + action + '</div>'
   + '</div>';
 }
 
-function usersOf(name) {
-  return last.instances
-    .filter(i => (i.mods || []).includes(name)
-              || (i.server_mods || []).includes(name)
-              || (i.keep_mods || []).includes(name))
-    .map(i => i.name);
+function targetBoxes(cls) {
+  if (!last.instances.length) return '';
+  return '<div class="field"><label>Add to</label><div class="targets ' + cls + '">'
+    + last.instances.map(i =>
+        '<label><input type="checkbox"' + attr('value', i.name) + '> ' + esc(i.name) + '</label>'
+      ).join('')
+    + '<span class="note">leave all unticked to add it to the config only</span>'
+    + '</div></div>';
 }
 
-let assigning = null;      // mod name whose assign panel is open
+function workshopPanel() {
+  let h = '<h2>Workshop</h2><div class="panel">'
+    + '<div class="field">'
+      + '<input type="text" id="q" data-enter="search"'
+      + ' placeholder="Search, or paste a Workshop link or id"'
+      + ' style="flex:1;min-width:18rem">'
+      + '<button data-act="search"' + (busy ? ' disabled' : '') + '>Search</button>'
+    + '</div>' + targetBoxes('wtargets');
 
-function listContaining(instance, name) {
-  if ((instance.mods || []).includes(name)) return 'mods';
-  if ((instance.server_mods || []).includes(name)) return 'server_mods';
-  if ((instance.keep_mods || []).includes(name)) return 'keep_mods';
-  return null;
-}
-
-const act2 = {
-  assign: n => { assigning = (assigning === n ? null : n); editing = null; cfgEditing = null;
-                 painted = ''; render(); },
-
-  saveAssign: async n => {
-    const list = document.getElementById('a-list').value;
-    const targets = [...document.querySelectorAll('.atargets input:checked')].map(e => e.value);
-    if (await send('PATCH', 'api/config/mods/' + encodeURIComponent(n) + '/instances',
-                   {instances: targets, list_name: list}, 'Assignment for ' + n)) {
-      assigning = null;
+  if (hits === null) {
+    h += '<p class="note">Searching needs a Steam Web API key. Pasting a link or an id '
+       + 'does not, so that works either way.</p>';
+  } else if (!hits.length) {
+    h += '<p class="note">nothing found for &ldquo;' + esc(hitsQuery) + '&rdquo;</p>';
+  } else {
+    h += hits.map(hitRow).join('');
+    if (hitsTotal > hits.length) {
+      h += '<p class="note">showing ' + hits.length + ' of ' + hitsTotal.toLocaleString()
+         + ' &mdash; narrow the search to see more</p>';
     }
-  },
-};
-
-function assignPanel(name) {
-  // Preselect the list the mod is already in somewhere, so opening the panel and saving
-  // without touching anything is a no-op rather than a silent move to "mods".
-  const current = last.instances.map(i => listContaining(i, name)).find(Boolean) || 'mods';
-  const opt = (v, label) =>
-    '<option value="' + v + '"' + (current === v ? ' selected' : '') + '>' + label + '</option>';
-
-  const boxes = last.instances.map(i => {
-    const where = listContaining(i, name);
-    const on = where === current;
-    const note = where && where !== current
-      ? ' <span class="note">(currently ' + where + ')</span>' : '';
-    return '<label><input type="checkbox" value="' + esc(i.name) + '"'
-      + (on ? ' checked' : '') + '> ' + esc(i.name) + note + '</label>';
-  }).join('');
-
-  return '<div class="panel"><h3>Which servers load ' + esc(name) + '?</h3>'
-    + '<div class="field"><label>As</label><select id="a-list">'
-      + opt('mods', 'loaded (-mod)')
-      + opt('server_mods', 'server only (-serverMod)')
-      + opt('keep_mods', 'kept, not loaded')
-    + '</select></div>'
-    + '<div class="field"><label>Servers</label><div class="targets atargets">' + boxes
-      + (last.instances.length ? '' : '<span class="note">no instances configured</span>')
-      + '</div></div>'
-    + '<div class="field"><label>&nbsp;</label>'
-      + '<button class="primary" onclick="act2.saveAssign(' + JSON.stringify(name) + ')">Save</button>'
-      + '<button onclick="act2.assign(' + JSON.stringify(name) + ')">Cancel</button>'
-      + '<span class="note">unticking removes it from that list only</span></div>'
-    + '</div>';
-}
-
-function modRow(m) {
-  const users = usersOf(m.name);
-  // Which list each one carries it in, since "used by" alone hides a real difference
-  // between loaded, server-only and merely kept.
-  const where = users.length
-    ? users.map(u => {
-        const list = listContaining(last.instances.find(i => i.name === u), m.name);
-        const label = list === 'server_mods' ? ' <span class="note">(server only)</span>'
-                    : list === 'keep_mods' ? ' <span class="note">(kept)</span>' : '';
-        return esc(u) + label;
-      }).join(', ')
-    : '<span class="warn">no instance uses it</span>';
-  const cached = (m.cached_versions || []).length
-    ? '<code>' + m.cached_versions[0] + '</code>'
-      + ((m.cached_versions.length > 1) ? ' <span class="note">+' + (m.cached_versions.length - 1) + '</span>' : '')
-    : '<span class="note">not downloaded</span>';
-  const id = m.kind === 'workshop' ? String(m.workshop_id) : 'local';
-  return '<tr>'
-    + '<td>' + esc(m.name)
-    + '<td><code>' + esc(id) + '</code>'
-    + '<td>' + cached
-    + '<td>' + where
-    + '<td><button onclick="act2.assign(' + JSON.stringify(m.name) + ')"'
-      + (busy ? ' disabled' : '') + '>Servers</button>'
-      + '<button class="danger" onclick="removeMod(' + JSON.stringify(m.name) + ','
-      + JSON.stringify(users) + ')"' + (busy ? ' disabled' : '') + '>Remove</button>'
-    + '</tr>';
+  }
+  return h + '</div>';
 }
 
 let localHits = null;
 let localPath = '';
 
 async function scanLocal() {
-  const path = document.getElementById('lp').value.trim();
+  const path = val('lp');
   if (!path) return;
   localPath = path;
   busy = true; painted = ''; render();
@@ -417,9 +868,8 @@ async function scanLocal() {
 async function addLocal(path) {
   // Its own checkboxes, not the Workshop panel's: ticking boxes in one panel must not
   // silently apply to an Add in the other.
-  const targets = [...document.querySelectorAll('.ltargets input:checked')].map(e => e.value);
-  if (await send('POST', 'api/localmods/add', {path: path, instances: targets},
-                 'Add local mod')) {
+  if (await send('POST', 'api/localmods/add', {path: path, instances: ticked('.ltargets')},
+                 'Added local mod')) {
     localHits = null;
   }
 }
@@ -430,7 +880,7 @@ function localRow(c) {
   if (c.has_keys) flags.push('has keys');
   const action = c.configured_as
     ? '<span class="run">added as ' + esc(c.configured_as) + '</span>'
-    : '<button class="primary" onclick="addLocal(' + JSON.stringify(c.path) + ')"'
+    : '<button class="primary" data-act="addLocal"' + attr('data-path', c.path)
       + (busy ? ' disabled' : '') + '>Add</button>';
   return '<div class="hit">'
     + '<div class="body">'
@@ -449,20 +899,10 @@ function localPanel() {
     + 'install, or one you built. dzsm points at them where they are: nothing is copied '
     + 'or downloaded, and steamcmd never touches them.</p>'
     + '<div class="field">'
-      + '<input type="text" id="lp" placeholder="Folder to scan, or a single mod folder"'
-      + ' style="flex:1;min-width:18rem" oninput="localPath=this.value"'
-      + ' onkeydown="if(event.key===\'Enter\')scanLocal()">'
-      + '<button onclick="scanLocal()"' + (busy ? ' disabled' : '') + '>Scan</button>'
-    + '</div>';
-
-  if (last.instances.length) {
-    h += '<div class="field"><label>Add to</label><div class="targets ltargets">'
-       + last.instances.map(i =>
-           '<label><input type="checkbox" value="' + esc(i.name) + '"> ' + esc(i.name) + '</label>'
-         ).join('')
-       + '<span class="note">leave all unticked to add it to the config only</span>'
-       + '</div></div>';
-  }
+      + '<input type="text" id="lp" data-enter="scan"'
+      + ' placeholder="Folder to scan, or a single mod folder" style="flex:1;min-width:18rem">'
+      + '<button data-act="scan"' + (busy ? ' disabled' : '') + '>Scan</button>'
+    + '</div>' + targetBoxes('ltargets');
 
   if (localHits === null) {
     h += '<p class="note">Nothing scanned yet.</p>';
@@ -474,144 +914,40 @@ function localPanel() {
   return h + '</div>';
 }
 
-function workshopPanel() {
-  const targets = last.instances.map(i =>
-    '<label><input type="checkbox" value="' + esc(i.name) + '"> ' + esc(i.name) + '</label>'
-  ).join('');
-
-  let h = '<h2>Workshop</h2><div class="panel">'
-    + '<div class="field">'
-      + '<input type="text" id="q" placeholder="Search, or paste a Workshop link or id"'
-      + ' style="flex:1;min-width:18rem" oninput="pendingQuery=this.value"'
-      + ' onkeydown="if(event.key===\'Enter\')searchWorkshop()">'
-      + '<button onclick="searchWorkshop()"' + (busy ? ' disabled' : '') + '>Search</button>'
-    + '</div>';
-
-  if (last.instances.length) {
-    h += '<div class="field"><label>Add to</label><div class="targets">' + targets
-       + '<span class="note">leave all unticked to add it to the config only</span>'
-       + '</div></div>';
-  }
-
-  if (hits === null) {
-    h += '<p class="note">Searching needs a Steam Web API key. Pasting a link or an id '
-       + 'does not, so that works either way.</p>';
-  } else if (!hits.length) {
-    h += '<p class="note">nothing found for &ldquo;' + esc(hitsQuery) + '&rdquo;</p>';
-  } else {
-    h += hits.map(hitRow).join('');
-    if (hitsTotal > hits.length) {
-      h += '<p class="note">showing ' + hits.length + ' of ' + hitsTotal.toLocaleString()
-         + ' &mdash; narrow the search to see more</p>';
-    }
-  }
-  return h + '</div>';
-}
-
-function settingsPanel(i) {
-  const cores = [];
-  const total = last.server.cpu_count || 0;
-  for (let c = 0; c < total; c++) {
-    const on = i.cpu_affinity && i.cpu_affinity.includes(c);
-    cores.push('<label class="' + (on ? 'on' : '') + '">'
-      + '<input type="checkbox" value="' + c + '"' + (on ? ' checked' : '')
-      + ' onchange="this.parentNode.classList.toggle(\'on\', this.checked)">' + c + '</label>');
-  }
-  const opt = (v, label) =>
-    '<option value="' + v + '"' + (i.priority === v ? ' selected' : '') + '>' + label + '</option>';
-  const flag = (id, on, label) =>
-    '<label><input type="checkbox" id="f-' + id + '"' + (on ? ' checked' : '') + '> ' + label + '</label>';
-
-  return '<div class="panel"><h3>Settings for ' + esc(i.name) + '</h3>'
-    + '<div class="field"><label>CPU cores</label><div class="cores">'
-      + (total ? cores.join('') : '<span class="note">unknown</span>')
-      + '</div></div>'
-    + '<div class="field"><label>&nbsp;</label><span class="note">'
-      + 'none selected = every core</span></div>'
-    + '<div class="field"><label>Priority</label><select id="f-priority">'
-      + '<option value="">(leave alone)</option>'
-      + opt('idle', 'idle') + opt('below_normal', 'below normal') + opt('normal', 'normal')
-      + opt('above_normal', 'above normal') + opt('high', 'high') + opt('realtime', 'realtime')
-      + '</select><span class="note">raising it usually needs elevation</span></div>'
-    + '<div class="field"><label>-cpuCount</label>'
-      + '<input type="number" id="f-cpucount" min="1" style="width:5rem" value="'
-      + (i.cpu_count == null ? '' : i.cpu_count) + '">'
-      + '<span class="note">engine threads, separate from affinity</span></div>'
-    + '<div class="field"><label>Restart after</label>'
-      + '<input type="number" id="f-hours" min="0" step="0.5" style="width:5rem" value="'
-      + (i.restart_after_hours == null ? '' : i.restart_after_hours) + '">'
-      + '<span class="note">hours from start; blank disables</span></div>'
-    + '<div class="field flags"><label>Flags</label><div>'
-      + flag('dologs', i.dologs, '-dologs') + flag('adminlog', i.adminlog, '-adminlog')
-      + flag('netlog', i.netlog, '-netlog') + flag('freezecheck', i.freezecheck, '-freezecheck')
-      + '</div></div>'
-    + '<div class="field"><label>&nbsp;</label>'
-      + '<button class="primary" onclick="act.save(\'' + esc(i.name) + '\')">Save</button>'
-      + '<button onclick="act.edit(\'' + esc(i.name) + '\')">Cancel</button></div>'
-    + '</div>';
-}
-
-function cfgPanel(name) {
-  return '<div class="panel"><h3>serverDZ.cfg &mdash; <span class="note" id="cfgpath"></span></h3>'
-    + '<textarea id="cfgtext" spellcheck="false"></textarea>'
-    + '<div class="field" style="margin-top:.6rem"><label>&nbsp;</label>'
-      + '<button class="primary" onclick="act.saveCfg(\'' + esc(name) + '\')">Save</button>'
-      + '<button onclick="act.editCfg(\'' + esc(name) + '\')">Cancel</button>'
-      + '<span class="note">not validated &mdash; it is the engine\'s format, so anything '
-      + 'it understands is allowed</span></div>'
-    + '</div>';
-}
-
-function instanceRow(i) {
-  const pins = Object.entries(i.pins).map(([k, v]) => k + '=' + v).join(', ') || '&mdash;';
-  const state = i.running
-    ? '<span class="run">running</span>'
-    : (i.held ? '<span class="held">held down</span>' : '<span class="stop">stopped</span>');
-  const n = esc(i.name);
+function renderMods() {
   const d = busy ? ' disabled' : '';
-  const buttons = (i.running
-    ? '<button class="danger" onclick="act.stop(\'' + n + '\')"' + d + '>Stop</button>'
-      + '<button onclick="act.restart(\'' + n + '\')"' + d + '>Restart</button>'
-    : '<button class="primary" onclick="act.start(\'' + n + '\')"' + d + '>Start</button>')
-    + '<button onclick="act.edit(\'' + n + '\')"' + d + '>Settings</button>'
-    + '<button onclick="act.editCfg(\'' + n + '\')"' + d + '>serverDZ.cfg</button>';
-  const tuning = [];
-  if (i.cpu_affinity) tuning.push('cores ' + i.cpu_affinity.join(','));
-  if (i.priority) tuning.push(esc(i.priority));
-  if (i.cpu_count) tuning.push(i.cpu_count + ' threads');
-  if (i.server_executable) tuning.push(esc(i.server_executable));
-  return '<tr>'
-    + '<td>' + n
-      + (tuning.length ? '<br><span class="note">' + tuning.join(' &middot; ') + '</span>' : '')
-    + '<td>' + state
-    + '<td>' + i.port + (i.rcon_port ? ' <span class="note">rcon ' + i.rcon_port + '</span>' : '')
-    + '<td><code>' + esc(pins) + '</code>'
-    + '<td>' + esc(i.next_restart ? i.next_restart.replace('T', ' ').slice(0, 16) : 'no schedule')
-    + '<td>' + buttons
-    + '</tr>';
+  let h = '<div class="bar">'
+    + '<button data-act="modsCheck"' + d + '>Check for mod updates</button>'
+    + '<button data-act="modsUpdate"' + d + '>Update mods</button>'
+    + '</div>';
+
+  h += '<h2>Configured mods</h2><table>'
+    + '<tr><th>Name<th>Source<th>Cached<th>Used by<th></tr>'
+    + last.mods.map(modRow).join('');
+  if (!last.mods.length) h += '<tr><td colspan="5">none configured</tr>';
+  h += '</table>';
+
+  if (assigning && last.mods.some(m => m.name === assigning)) h += assignPanel(assigning);
+
+  h += workshopPanel() + localPanel();
+
+  h += '<h2>Cached versions</h2><table>'
+    + '<tr><th>Mod<th>Version<th>Size<th>Age<th>Status</tr>'
+    + last.versions.map(versionRow).join('');
+  if (!last.versions.length) h += '<tr><td colspan="5">nothing cached</tr>';
+  h += '</table>';
+  return h;
 }
 
-function versionRow(v) {
-  const use = v.pinned_by.length
-    ? '<span class="run">in use by ' + esc(v.pinned_by.join(', ')) + '</span>'
-    : (v.kept_by.length
-        ? '<span class="held">kept by ' + esc(v.kept_by.join(', ')) + '</span>'
-        : '<span class="warn">unused</span>');
-  return '<tr>'
-    + '<td>' + esc(v.mod_name || v.workshop_id)
-    + '<td><code>' + v.version + '</code>'
-    + '<td>' + mib(v.size_bytes)
-    + '<td>' + age(v.age_days)
-    + '<td>' + use + (v.exists ? '' : ' <span class="err">MISSING</span>')
-    + '</tr>';
-}
+// --- paint ---------------------------------------------------------------------
 
 function renderJobs() {
   const running = jobs.filter(j => j.status === 'running');
   const recent = jobs.filter(j => j.status !== 'running').slice(0, 3);
   let h = '';
   for (const j of running) {
-    h += '<div class="job"><span class="spin">&#9696;</span> ' + esc(j.kind) + ' running&hellip;</div>';
+    h += '<div class="job"><span class="spin">&#9696;</span> ' + esc(j.kind)
+       + ' running&hellip;</div>';
   }
   for (const j of recent) {
     const cls = j.status === 'succeeded' ? 'run' : 'err';
@@ -622,60 +958,34 @@ function renderJobs() {
   document.getElementById('jobs').innerHTML = h;
 }
 
-let last = {instances: [], versions: [], server: {builds: [], active: null}, mods: []};
+const FOOTERS = {
+  overview: 'Refreshes every few seconds. Steam Guard is seeded once with '
+          + '<code>dzsm login --interactive</code>.',
+  server: 'Everything here applies at the server\'s next start &mdash; nothing is changed '
+        + 'underneath a running server.',
+  mods: 'Adding a mod configures it; downloading it is <b>Update mods</b>, and it is '
+      + 'activated at each server\'s next start.',
+};
 
 function render() {
-  const d = busy ? ' disabled' : '';
-  let h = '<div class="bar">'
-    + '<button onclick="act.modsCheck()"' + d + '>Check for mod updates</button>'
-    + '<button onclick="act.modsUpdate()"' + d + '>Update mods</button>'
-    + '<button onclick="act.serverUpdate()"' + d + '>Update server app</button>'
-    + '<input id="token" type="password" placeholder="API token (only if set)">'
-    + '</div>';
+  const view = route();
+  document.getElementById('nav').innerHTML = navBar(view);
+  document.getElementById('c').innerHTML =
+      view.page === 'server' ? renderServer(view.name)
+    : view.page === 'mods' ? renderMods()
+    : renderOverview();
+  document.getElementById('foot').innerHTML = FOOTERS[view.page];
 
-  h += '<h2>Instances</h2><table>'
-    + '<tr><th>Name<th>State<th>Ports<th>Pinned<th>Next restart<th></tr>';
-  h += last.instances.map(instanceRow).join('');
-  if (!last.instances.length) h += '<tr><td colspan="6">none configured</tr>';
-  h += '</table>';
-
-  const open = last.instances.find(i => i.name === editing);
-  if (open) h += settingsPanel(open);
-  if (cfgEditing) h += cfgPanel(cfgEditing);
-
-  h += '<h2>Cached mod versions</h2><table>'
-    + '<tr><th>Mod<th>Version<th>Size<th>Age<th>Status</tr>';
-  h += last.versions.map(versionRow).join('');
-  if (!last.versions.length) h += '<tr><td colspan="5">nothing cached</tr>';
-
-  h += '</table><h2>Configured mods</h2><table>'
-    + '<tr><th>Name<th>Workshop id<th>Cached<th>Used by<th></tr>';
-  h += last.mods.map(modRow).join('');
-  if (!last.mods.length) h += '<tr><td colspan="5">none configured</tr>';
-  h += '</table>';
-
-  if (assigning && last.mods.some(m => m.name === assigning)) h += assignPanel(assigning);
-
-  h += workshopPanel() + localPanel();
-
-  h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
-  h += last.server.builds.map(b =>
-    '<tr><td><code>' + esc(b) + '</code><td>' + (b === last.server.active ? 'newest' : '') + '</tr>'
-  ).join('');
-  if (!last.server.builds.length) h += '<tr><td colspan="2">none downloaded</tr>';
-  h += '</table>';
-  if (last.server.server_app_path) {
-    h += '<p class="note">Instances use <code>' + esc(last.server.server_app_path) + '</code></p>';
-  }
-
-  document.getElementById('c').innerHTML = h;
   const box = document.getElementById('token');
-  box.value = token();
-  box.addEventListener('change', e => sessionStorage.setItem('dzsm-token', e.target.value));
+  if (box) {
+    box.value = token();
+    box.addEventListener('change', e => sessionStorage.setItem('dzsm-token', e.target.value));
+  }
   const qbox = document.getElementById('q');
   if (qbox) qbox.value = pendingQuery;
   const lbox = document.getElementById('lp');
   if (lbox) lbox.value = localPath;
+  dirty = false;
   renderJobs();
 }
 
@@ -683,32 +993,32 @@ let painted = '';
 
 async function load() {
   try {
-    const [inst, vers, srv, health, jl, mods] = await Promise.all([
+    const [inst, vers, srv, health, jl, mods, glob] = await Promise.all([
       fetch('api/instances').then(r => r.json()),
       fetch('api/versions').then(r => r.json()),
       fetch('api/server').then(r => r.json()),
       fetch('api/health').then(r => r.json()),
       fetch('api/jobs').then(r => r.json()),
       fetch('api/mods').then(r => r.json()),
+      fetch('api/config/global').then(r => r.json()),
     ]);
-    last = {instances: inst, versions: vers, server: srv, mods: mods};
+    last = {instances: inst, versions: vers, server: srv, mods: mods, global: glob};
     jobs = jl;
     document.getElementById('root').textContent = health.root;
 
-    // Only repaint when something actually changed. Rebuilding the DOM on a timer
-    // wipes whatever is being typed in the token box and can swallow a click that
-    // lands mid-refresh.
+    // Only repaint when something actually changed. Rebuilding the DOM on a timer wipes
+    // whatever is being typed and can swallow a click that lands mid-refresh.
     //
     // age_days is recomputed server-side on every request, so it is rounded to the
-    // precision actually displayed — otherwise nothing ever compares equal and the
-    // page repaints forever.
+    // precision actually displayed — otherwise nothing ever compares equal and the page
+    // repaints forever.
     const snapshot = JSON.stringify(
-      [last, jobs, busy, editing, cfgEditing, assigning],
+      [last, jobs, busy, location.hash, cfgEditing, assigning],
       (k, v) => (k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v));
     if (snapshot === painted) return;
-    // Never repaint underneath an open editor: it would discard whatever has been typed
-    // into a panel or the serverDZ.cfg textarea, or reset half-ticked checkboxes.
-    if (editing || cfgEditing || assigning) return;
+    // Never repaint over unsaved edits, an open assignment panel, or a search box being
+    // typed into.
+    if (dirty || assigning) return;
     const focused = document.activeElement && document.activeElement.id;
     if (focused === 'token' || focused === 'q' || focused === 'lp') return;
     painted = snapshot;
@@ -719,6 +1029,15 @@ async function load() {
   }
 }
 
+// The search boxes keep their text across repaints; they are not [data-form], because a
+// half-typed query should not freeze the page's live updates the way an unsaved setting
+// does.
+document.addEventListener('input', e => {
+  if (e.target.id === 'q') pendingQuery = e.target.value;
+  if (e.target.id === 'lp') localPath = e.target.value;
+});
+
+render();
 load();
 setInterval(() => load(), 4000);
 </script>
