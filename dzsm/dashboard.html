@@ -242,6 +242,32 @@ async function searchWorkshop() {
   }
 }
 
+async function removeMod(name, usedBy) {
+  const warning = usedBy.length
+    ? '\n\nIt is used by ' + usedBy.join(', ') + ', so it will be taken out of their '
+      + 'load orders too.'
+    : '';
+  if (!confirm('Remove "' + name + '" from the config?' + warning
+      + '\n\nDownloaded files are kept — remove those separately.')) return;
+
+  const url = 'api/config/mods/' + encodeURIComponent(name) + (usedBy.length ? '?force=true' : '');
+  if (busy) return;
+  busy = true; render();
+  try {
+    const r = await fetch(url, {method: 'DELETE', headers: headers()});
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) { say(out.detail || 'remove failed', true); }
+    else {
+      const kept = (out.cached_versions || []).length;
+      say('Removed ' + name + (kept ? ' (' + kept + ' cached version(s) kept)' : ''));
+    }
+  } catch (e) {
+    say('remove failed: ' + e, true);
+  } finally {
+    busy = false; painted = ''; load();
+  }
+}
+
 async function addMod(id) {
   const targets = [...document.querySelectorAll('.targets input:checked')].map(e => e.value);
   if (await send('POST', 'api/workshop/' + id + '/add', {instances: targets},
@@ -274,6 +300,34 @@ function hitRow(h) {
     + '</div>'
     + '<div class="act">' + action + '</div>'
   + '</div>';
+}
+
+function usersOf(name) {
+  return last.instances
+    .filter(i => (i.mods || []).includes(name)
+              || (i.server_mods || []).includes(name)
+              || (i.keep_mods || []).includes(name))
+    .map(i => i.name);
+}
+
+function modRow(m) {
+  const users = usersOf(m.name);
+  const where = users.length
+    ? esc(users.join(', '))
+    : '<span class="warn">no instance uses it</span>';
+  const cached = (m.cached_versions || []).length
+    ? '<code>' + m.cached_versions[0] + '</code>'
+      + ((m.cached_versions.length > 1) ? ' <span class="note">+' + (m.cached_versions.length - 1) + '</span>' : '')
+    : '<span class="note">not downloaded</span>';
+  const id = m.kind === 'workshop' ? String(m.workshop_id) : 'local';
+  return '<tr>'
+    + '<td>' + esc(m.name)
+    + '<td><code>' + esc(id) + '</code>'
+    + '<td>' + cached
+    + '<td>' + where
+    + '<td><button class="danger" onclick="removeMod(' + JSON.stringify(m.name) + ','
+      + JSON.stringify(users) + ')"' + (busy ? ' disabled' : '') + '>Remove</button>'
+    + '</tr>';
 }
 
 function workshopPanel() {
@@ -424,7 +478,7 @@ function renderJobs() {
   document.getElementById('jobs').innerHTML = h;
 }
 
-let last = {instances: [], versions: [], server: {builds: [], active: null}};
+let last = {instances: [], versions: [], server: {builds: [], active: null}, mods: []};
 
 function render() {
   const d = busy ? ' disabled' : '';
@@ -450,7 +504,13 @@ function render() {
   h += last.versions.map(versionRow).join('');
   if (!last.versions.length) h += '<tr><td colspan="5">nothing cached</tr>';
 
-  h += '</table>' + workshopPanel();
+  h += '</table><h2>Configured mods</h2><table>'
+    + '<tr><th>Name<th>Workshop id<th>Cached<th>Used by<th></tr>';
+  h += last.mods.map(modRow).join('');
+  if (!last.mods.length) h += '<tr><td colspan="5">none configured</tr>';
+  h += '</table>';
+
+  h += workshopPanel();
 
   h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
@@ -475,14 +535,15 @@ let painted = '';
 
 async function load() {
   try {
-    const [inst, vers, srv, health, jl] = await Promise.all([
+    const [inst, vers, srv, health, jl, mods] = await Promise.all([
       fetch('api/instances').then(r => r.json()),
       fetch('api/versions').then(r => r.json()),
       fetch('api/server').then(r => r.json()),
       fetch('api/health').then(r => r.json()),
       fetch('api/jobs').then(r => r.json()),
+      fetch('api/mods').then(r => r.json()),
     ]);
-    last = {instances: inst, versions: vers, server: srv};
+    last = {instances: inst, versions: vers, server: srv, mods: mods};
     jobs = jl;
     document.getElementById('root').textContent = health.root;
 

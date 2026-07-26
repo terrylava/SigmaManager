@@ -194,6 +194,50 @@ def add_mod_to_instance(
     return document
 
 
+def instances_using(document: TOMLDocument, mod_name: str) -> list[str]:
+    """Instances that reference a mod anywhere — loaded, server-only, or merely kept."""
+    using = []
+    for instance_name, table in (document.get("instances") or {}).items():
+        for key in ("mods", "server_mods", "keep_mods"):
+            if mod_name in list(table.get(key) or []):
+                using.append(instance_name)
+                break
+    return sorted(using)
+
+
+def remove_mod_from_config(
+    document: TOMLDocument, name: str, *, strip_from_instances: bool = False
+) -> TOMLDocument:
+    """Remove a [mods.<name>] entry.
+
+    Refuses while an instance still references it, because config validation would reject
+    the result anyway — an instance naming a mod that does not exist will not load. With
+    `strip_from_instances` the name is pulled out of every load order first, which is a
+    real edit to those instances and so is never the default.
+    """
+    mods = document.get("mods")
+    if mods is None or name not in mods:
+        raise SettingsError(f"no mod named {name!r} in the config")
+
+    using = instances_using(document, name)
+    if using and not strip_from_instances:
+        raise SettingsError(
+            f"{name!r} is still used by {', '.join(using)}. Remove it from them first, "
+            f"or pass force to take it out of their load orders too."
+        )
+
+    for table in (document.get("instances") or {}).values():
+        for key in ("mods", "server_mods", "keep_mods"):
+            array = table.get(key)
+            if array is None:
+                continue
+            while name in list(array):
+                array.remove(name)
+
+    del mods[name]
+    return document
+
+
 def save(path: Path, document: TOMLDocument) -> Config:
     """Validate, back up the current file, and write atomically.
 

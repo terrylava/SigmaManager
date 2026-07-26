@@ -198,6 +198,7 @@ def create_app(config_path: Path) -> FastAPI:
                     "held": name in state.held,
                     "mods": instance.mods,
                     "server_mods": instance.server_mods,
+                    "keep_mods": instance.keep_mods,
                     "pins": state.pins.get(name, {}),
                     "rcon_port": instance.resolved_rcon_port(),
                     "cpu_affinity": instance.cpu_affinity,
@@ -489,6 +490,36 @@ def create_app(config_path: Path) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return {"added": name, "workshop_id": workshop_id, "instances": body.instances}
+
+    @app.delete("/api/config/mods/{name}", dependencies=writes)
+    def remove_configured_mod(name: str, force: bool = False) -> dict[str, Any]:
+        """Remove a mod from the config.
+
+        Separate from `DELETE /api/mods/{workshop_id}`, which deletes downloaded files:
+        this forgets the mod, that reclaims disk. Removing from the config leaves any
+        cached versions behind, where they show up as orphaned and can be deleted
+        separately — losing a multi-GB download because a name was removed would be a
+        poor trade.
+        """
+        nonlocal config
+        if name not in config.mods:
+            raise HTTPException(status_code=404, detail=f"no mod named {name!r}")
+
+        mod = config.mods[name]
+        state = current_state()
+        try:
+            document = settings.read_document(config_path)
+            using = settings.instances_using(document, name)
+            settings.remove_mod_from_config(document, name, strip_from_instances=force)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            # 409: the request is fine, the config still depends on it.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        cached = (
+            state.known_versions(mod.workshop_id) if isinstance(mod, WorkshopMod) else []
+        )
+        return {"removed": name, "unassigned_from": using, "cached_versions": cached}
 
     # --- settings ------------------------------------------------------------
 
