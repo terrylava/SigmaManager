@@ -69,6 +69,10 @@ class State(BaseModel):
     server_builds: dict[str, str] = Field(default_factory=dict)
     # Installed server app version, if any.
     serverapp_version: str | None = None
+    # When Steam was last asked what changed. Separate from last_seen_remote, which only
+    # records the answer: without this there is no way to tell "nothing has changed" from
+    # "nothing has been checked", and those need very different responses.
+    last_checked_at: datetime | None = None
 
     def record_version(self, workshop_id: int, version: int, size_bytes: int = 0) -> None:
         """Register a promoted snapshot."""

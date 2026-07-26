@@ -276,6 +276,19 @@ class Config(BaseModel):
     mission_prefix: str = "sigma"
     # How often the supervision loop checks liveness and the restart schedule.
     supervise_poll_seconds: int = 15
+    # How often the daemon asks Steam what changed, in minutes. 0 turns it off and leaves
+    # checking to the button and the CLI. A check is one request covering every configured
+    # mod, so this is cheap to run often.
+    #
+    # 0 rather than null for "off", because TOML has no null: omitting the key would give
+    # the default of 30, so with a nullable field there would be no way to express "off"
+    # in the config file at all.
+    mod_check_interval_minutes: int = 30
+    # Download what the check found, rather than only reporting it. Safe to leave on:
+    # downloading is decoupled from activation (spec §2), so a new version lands in the
+    # cache and is not used by anything until an instance next starts. Off by default
+    # anyway — it spends bandwidth and disk without being asked.
+    mod_check_auto_download: bool = False
     # Grace period for a server to shut down before it is killed. DayZ flushes
     # persistence on exit, so do not make this small.
     stop_timeout_seconds: int = 60
@@ -443,6 +456,16 @@ class Config(BaseModel):
             raise ValueError(
                 f"gc_retention_days must be at least 1 day, got {v}. To disable "
                 f"automatic deletion entirely, omit it or set it to null."
+            )
+        return v
+
+    @field_validator("mod_check_interval_minutes")
+    @classmethod
+    def _check_interval_cannot_be_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"mod_check_interval_minutes cannot be negative, got {v}. Use 0 to turn "
+                f"automatic checking off."
             )
         return v
 

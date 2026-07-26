@@ -26,6 +26,7 @@ from dzsm.mods import (
     promote_snapshot,
     promote_tree,
     prunable,
+    record_check,
     remove_mod,
     unused_mods,
     version_status,
@@ -461,6 +462,11 @@ def mods_check(config_path: ConfigPath = Path("config.toml")) -> None:
         remote = check_updates([mod.workshop_id for mod in workshop.values()])
     except SteamError as exc:
         _fail(exc)
+
+    # Recorded, not just printed: the dashboard reports what the last check found, and a
+    # check run from a terminal is still a check.
+    record_check(cfg, state, remote)
+    save_state(cfg.state_file, state)
 
     for name, mod in workshop.items():
         latest = remote.get(mod.workshop_id)

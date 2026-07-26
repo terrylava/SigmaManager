@@ -27,6 +27,8 @@ import secrets
 import sys
 import threading
 import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,7 @@ from dzsm.mods import (
     local_copy,
     promote_snapshot,
     promote_tree,
+    record_check,
     remove_mod,
     safe_rmtree,
     scan_for_mods,
@@ -66,6 +69,12 @@ from dzsm.steam import (
 _log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-DZSM-Token"  # noqa: S105 — a header name, not a secret
+
+# Search paging limits. Steam's query API stops returning results well before the total
+# it reports would suggest, so offering a page number for every match would produce empty
+# pages; 50 is deep enough that nobody sensibly pages that far for a mod.
+MAX_SEARCH_PER_PAGE = 50
+MAX_SEARCH_PAGES = 50
 
 
 class AddMod(BaseModel):
@@ -167,6 +176,85 @@ class JobRegistry:
         with self._lock:
             return sorted(self._jobs.values(), key=lambda j: j.started_at, reverse=True)
 
+    def is_running(self, kind: str) -> bool:
+        """Whether a job of this kind is in flight, so a second is not started on top."""
+        with self._lock:
+            return any(j.kind == kind and j.status == "running" for j in self._jobs.values())
+
+
+# How long after startup the first automatic check runs. Deliberately not the full
+# interval: a daemon that has just come up should be able to say whether anything is out
+# of date, rather than reporting "never checked" for the next half hour. Deliberately not
+# zero either, so restarting the daemon in a loop does not hammer Steam.
+FIRST_CHECK_DELAY_SECONDS = 30
+
+# How often the checker wakes while checking is switched off, only to see whether it has
+# been switched back on. Turning it on in the UI has to be noticed by the thread that
+# does the work, and nothing else tells it.
+DISABLED_POLL_SECONDS = 60
+
+
+def _auto_check(
+    get_config: Callable[[], Config], jobs: JobRegistry, stop: threading.Event
+) -> None:
+    """Ask Steam what changed, on an interval, for as long as the daemon is up.
+
+    Reads the interval from the *current* config on every pass rather than capturing it,
+    so changing it in the web UI takes effect without a restart — the same reason the
+    supervisor re-reads config.
+
+    A failure here is logged and nothing else. This runs unattended, and an update check
+    is not something that should be able to take the daemon down (Rule 3).
+    """
+    delay: float = FIRST_CHECK_DELAY_SECONDS
+    while not stop.wait(delay):
+        config = get_config()
+        interval = config.mod_check_interval_minutes
+        if interval <= 0:
+            # Turned off, but pollable: someone may turn it back on from the UI, and this
+            # thread is what would have to notice.
+            delay = DISABLED_POLL_SECONDS
+            continue
+        delay = interval * 60
+
+        if jobs.is_running("mods.update") or jobs.is_running("mods.check"):
+            _log.info("auto-check: an update is already running, skipping this pass")
+            continue
+
+        job = jobs.create("mods.check")
+        try:
+            found = _check_and_record(config)
+        except SteamError as exc:
+            _log.error("auto-check failed: %s", exc)
+            jobs.finish(job.id, ok=False, detail=str(exc))
+            continue
+
+        detail = (
+            f"{len(found)} update(s) available: {', '.join(sorted(found))}"
+            if found
+            else "everything up to date"
+        )
+        jobs.finish(job.id, ok=True, detail=detail)
+
+        if found and config.mod_check_auto_download:
+            download = jobs.create("mods.update")
+            _run_mod_update(config, jobs, download.id)
+
+
+def _check_and_record(config: Config) -> dict[str, int]:
+    """Ask Steam for every configured mod, record the answers, return what is behind.
+
+    Maps mod name -> the newer version available. Empty when everything is current, which
+    is a real answer and not a falsy failure (Rule 1).
+    """
+    workshop = {name: mod for name, mod in config.mods.items() if isinstance(mod, WorkshopMod)}
+    remote = check_updates([mod.workshop_id for mod in workshop.values()])
+
+    state = load_state(config.state_file)
+    behind = record_check(config, state, remote)
+    save_state(config.state_file, state)
+    return behind
+
 
 def create_app(config_path: Path) -> FastAPI:
     """Build the API around one config file.
@@ -180,10 +268,36 @@ def create_app(config_path: Path) -> FastAPI:
     # next daemon restart.
     config = load_config(config_path)
     jobs = JobRegistry()
+    checker_stop = threading.Event()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Run the automatic update check for as long as the daemon is up.
+
+        A thread rather than an async task: check_updates and steamcmd are both blocking,
+        and running them on the event loop would stall every request for the duration of
+        a download.
+        """
+        checker = threading.Thread(
+            # Reads `config` through a closure, not a captured value, so an interval
+            # changed through the settings form is picked up on the next pass.
+            target=_auto_check,
+            args=(lambda: config, jobs, checker_stop),
+            name="dzsm-autocheck",
+            daemon=True,
+        )
+        checker.start()
+        try:
+            yield
+        finally:
+            checker_stop.set()
+            checker.join(timeout=5)
+
     app = FastAPI(
         title="dzsm",
         summary="DayZ server manager",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     def current_state() -> State:
@@ -262,13 +376,40 @@ def create_app(config_path: Path) -> FastAPI:
         for name, mod in config.mods.items():
             entry: dict[str, Any] = {"name": name, "kind": mod.kind}
             if isinstance(mod, WorkshopMod):
+                cached = state.known_versions(mod.workshop_id)
+                latest = state.last_seen_remote.get(mod.workshop_id)
                 entry["workshop_id"] = mod.workshop_id
                 entry["pinned_version"] = mod.pinned_version
-                entry["cached_versions"] = state.known_versions(mod.workshop_id)
+                entry["cached_versions"] = cached
+                entry["latest_remote"] = latest
+                # A pinned mod is never "behind": it is held at a version deliberately,
+                # and reporting it as out of date would nag about a decision already made.
+                entry["update_available"] = (
+                    mod.pinned_version is None and latest is not None and latest not in cached
+                )
             else:
                 entry["path"] = str(mod.path)
+                entry["update_available"] = False
             result.append(entry)
         return result
+
+    @app.get("/api/updates")
+    def update_status() -> dict[str, Any]:
+        """What the last check found, and when the next one is due."""
+        state = current_state()
+        behind = []
+        for name, mod in config.mods.items():
+            if not isinstance(mod, WorkshopMod) or mod.pinned_version is not None:
+                continue
+            latest = state.last_seen_remote.get(mod.workshop_id)
+            if latest is not None and latest not in state.known_versions(mod.workshop_id):
+                behind.append(name)
+        return {
+            "last_checked": state.last_checked_at.isoformat() if state.last_checked_at else None,
+            "interval_minutes": config.mod_check_interval_minutes,
+            "auto_download": config.mod_check_auto_download,
+            "available": sorted(behind),
+        }
 
     @app.get("/api/versions")
     def list_versions() -> list[dict[str, Any]]:
@@ -382,14 +523,17 @@ def create_app(config_path: Path) -> FastAPI:
     @app.post("/api/mods/check", dependencies=writes)
     def check_mods() -> dict[str, Any]:
         """Ask Steam what changed. Fast, so it runs inline rather than as a job."""
-        state = current_state()
         workshop = {
             name: mod for name, mod in config.mods.items() if isinstance(mod, WorkshopMod)
         }
         try:
-            remote = check_updates([mod.workshop_id for mod in workshop.values()])
+            # Goes through the same recording path as the automatic check, so pressing the
+            # button and waiting for the timer leave the state file saying the same thing.
+            _check_and_record(config)
         except SteamError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        state = current_state()
+        remote = state.last_seen_remote
 
         return {
             name: {
@@ -449,16 +593,24 @@ def create_app(config_path: Path) -> FastAPI:
     # --- workshop ------------------------------------------------------------
 
     @app.get("/api/workshop/search")
-    def workshop_search(q: str, page: int = 1) -> dict[str, Any]:
-        """Search the DayZ Workshop.
+    def workshop_search(q: str, page: int = 1, per_page: int = 20) -> dict[str, Any]:
+        """Search the DayZ Workshop, one page at a time.
 
         Steam's own page cannot be embedded — it sends frame-ancestors headers, and a
         cross-origin frame could not be read from anyway — so this is our own search over
         their Web API.
+
+        `total` is Steam's count of everything matching, not what came back, so the caller
+        can offer the pages it has not fetched.
         """
         state = current_state()
+        if page < 1:
+            raise HTTPException(status_code=422, detail="page starts at 1")
+        per_page = max(1, min(per_page, MAX_SEARCH_PER_PAGE))
         try:
-            items, total = search_workshop(config.steam.api_key(), q, page=page)
+            items, total = search_workshop(
+                config.steam.api_key(), q, page=page, per_page=per_page
+            )
         except SteamError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -470,6 +622,10 @@ def create_app(config_path: Path) -> FastAPI:
         return {
             "total": total,
             "page": page,
+            "per_page": per_page,
+            # Steam caps how deep paging can go; without this the browser would offer
+            # pages that come back empty.
+            "pages": max(1, min(-(-total // per_page), MAX_SEARCH_PAGES)),
             "items": [_workshop_json(item, configured, state) for item in items],
         }
 

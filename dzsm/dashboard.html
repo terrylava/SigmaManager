@@ -103,7 +103,8 @@ const attr = (name, value) => ' ' + name + '="' + esc(value) + '"';
 
 let busy = false;
 let jobs = [];
-let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null};
+let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null,
+            updates: null};
 
 function token() { return sessionStorage.getItem('dzsm-token') || ''; }
 function headers() { const t = token(); return t ? {'X-DZSM-Token': t} : {}; }
@@ -379,7 +380,8 @@ const actions = {
 
   // --- workshop and local scan ---
 
-  search: searchWorkshop,
+  search: () => searchWorkshop(),
+  page: d => searchWorkshop(+d.page),
   addWorkshop: d => addMod(d.id),
   scan: scanLocal,
   addLocal: d => addLocal(d.path),
@@ -390,6 +392,10 @@ const actions = {
 // Declared rather than hand-written so the form, the collector, and the whitelist cannot
 // drift apart. `k` is the dotted path the API expects.
 const GLOBAL_FIELDS = [
+  {k: 'mod_check_interval_minutes', t: 'num', label: 'Check for mod updates',
+   note: 'minutes between automatic checks; 0 turns them off'},
+  {k: 'mod_check_auto_download', t: 'bool', label: 'Download what it finds',
+   note: 'safe while servers run - a new version is only activated at the next restart'},
   {k: 'gc_retention_days', t: 'num', label: 'Keep unused versions',
    note: 'days before automatic deletion; blank never deletes anything'},
   {k: 'download_timeout_seconds', t: 'num', label: 'Download timeout', note: 'seconds'},
@@ -713,6 +719,8 @@ function modRow(m) {
        ? '<code>' + m.cached_versions[0] + '</code>'
          + (m.cached_versions.length > 1
             ? ' <span class="note">+' + (m.cached_versions.length - 1) + '</span>' : '')
+         + (m.update_available
+            ? '<br><span class="warn">' + m.latest_remote + ' available</span>' : '')
        : '<span class="note">not downloaded</span>');
   const source = m.kind === 'workshop'
     ? '<code>' + esc(m.workshop_id) + '</code>'
@@ -748,40 +756,81 @@ function versionRow(v) {
 let hits = null;          // null = the browser has not been used yet
 let hitsTotal = 0;
 let hitsQuery = '';
+let hitsPage = 1;
+let hitsPages = 1;
 let pendingQuery = '';    // survives a repaint, so a background refresh cannot eat it
 
-async function searchWorkshop() {
-  const raw = val('q');
+async function searchWorkshop(page) {
+  // The query comes from the box on a new search, but from the last one when paging:
+  // the box may have been typed into since, and page 2 must be page 2 of the results
+  // actually on screen.
+  const raw = page ? hitsQuery : val('q');
   if (!raw) return;
   hitsQuery = raw;
+  hitsPage = page || 1;
 
   // A pasted link or a bare id is a lookup, not a search - and that path needs no API
   // key, so it works for people who never made one.
   const direct = raw.match(/^\s*(?:https?:\/\/\S*[?&]id=)?(\d{6,})\s*$/);
   const url = direct
     ? 'api/workshop/' + direct[1]
-    : 'api/workshop/search?q=' + encodeURIComponent(raw);
+    : 'api/workshop/search?q=' + encodeURIComponent(raw) + '&page=' + hitsPage;
 
   busy = true; painted = ''; render();
   try {
     const r = await fetch(url, {headers: headers()});
     const out = await r.json();
-    if (!r.ok) { say(out.detail || 'search failed', true); hits = []; }
-    else if (direct) { hits = [out]; hitsTotal = 1; }
-    else { hits = out.items; hitsTotal = out.total; }
+    if (!r.ok) { say(out.detail || 'search failed', true); hits = []; hitsPages = 1; }
+    else if (direct) { hits = [out]; hitsTotal = 1; hitsPages = 1; }
+    else { hits = out.items; hitsTotal = out.total; hitsPages = out.pages; }
   } catch (e) {
-    say('search failed: ' + e, true); hits = [];
+    say('search failed: ' + e, true); hits = []; hitsPages = 1;
   } finally {
     busy = false; painted = ''; render();
+    // Paging redraws the list above the fold; without this the second page opens
+    // scrolled to wherever the first one was being read.
+    if (page) {
+      const box = document.getElementById('q');
+      if (box) box.scrollIntoView({block: 'center'});
+    }
   }
 }
 
-async function addMod(id) {
-  if (await send('POST', 'api/workshop/' + id + '/add', {instances: ticked('.wtargets')},
-                 'Added mod ' + id)) {
-    hits = null;                       // the results are stale once it is configured
-    pendingQuery = '';
+function pager() {
+  if (hits === null || hitsPages <= 1) return '';
+  const d = busy ? ' disabled' : '';
+  const button = (page, label, on) =>
+    '<button data-act="page"' + attr('data-page', page)
+    + (on ? d : ' disabled') + '>' + label + '</button>';
+
+  // A window around the current page, not every page: 50 pages of buttons is not a
+  // navigation aid.
+  const from = Math.max(1, Math.min(hitsPage - 2, hitsPages - 4));
+  const to = Math.min(hitsPages, from + 4);
+  let numbers = '';
+  for (let p = from; p <= to; p++) {
+    numbers += p === hitsPage
+      ? '<button class="primary" disabled>' + p + '</button>'
+      : button(p, p, true);
   }
+
+  return '<div class="field" style="margin-top:.8rem">'
+    + button(hitsPage - 1, '&larr; Prev', hitsPage > 1)
+    + numbers
+    + button(hitsPage + 1, 'Next &rarr;', hitsPage < hitsPages)
+    + '<span class="note">page ' + hitsPage + ' of ' + hitsPages
+    + ' &middot; ' + hitsTotal.toLocaleString() + ' matches</span></div>';
+}
+
+async function addMod(id) {
+  const out = await send('POST', 'api/workshop/' + id + '/add',
+                         {instances: ticked('.wtargets')}, 'Added mod ' + id);
+  if (!out) return;
+  // Mark it added rather than dropping the results: with paging, clearing them would
+  // throw away the page being read and there is no way back to it but searching again.
+  const hit = (hits || []).find(h => String(h.workshop_id) === String(id));
+  if (hit) hit.configured_as = out.added;
+  painted = ''; render();
 }
 
 function hitRow(h) {
@@ -836,11 +885,7 @@ function workshopPanel() {
   } else if (!hits.length) {
     h += '<p class="note">nothing found for &ldquo;' + esc(hitsQuery) + '&rdquo;</p>';
   } else {
-    h += hits.map(hitRow).join('');
-    if (hitsTotal > hits.length) {
-      h += '<p class="note">showing ' + hits.length + ' of ' + hitsTotal.toLocaleString()
-         + ' &mdash; narrow the search to see more</p>';
-    }
+    h += hits.map(hitRow).join('') + pager();
   }
   return h + '</div>';
 }
@@ -914,12 +959,39 @@ function localPanel() {
   return h + '</div>';
 }
 
+function ago(iso) {
+  if (!iso) return 'never';
+  const seconds = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (seconds < 90) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return minutes + ' min ago';
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? hours + 'h ago' : Math.round(hours / 24) + 'd ago';
+}
+
+function updateBanner() {
+  const u = last.updates;
+  if (!u) return '';
+  const when = 'checked ' + ago(u.last_checked)
+    + (u.interval_minutes ? ', every ' + u.interval_minutes + ' min' : ', automatic checks off')
+    + (u.auto_download ? ', downloading automatically' : '');
+  if (!u.available.length) {
+    return '<p class="note">Everything up to date &mdash; ' + esc(when) + '.</p>';
+  }
+  return '<p><span class="warn">' + u.available.length + ' update'
+    + (u.available.length === 1 ? '' : 's') + ' available</span>: '
+    + esc(u.available.join(', '))
+    + ' <span class="note">&mdash; ' + esc(when)
+    + (u.auto_download ? '' : '; press Update mods to download')
+    + '</span></p>';
+}
+
 function renderMods() {
   const d = busy ? ' disabled' : '';
   let h = '<div class="bar">'
     + '<button data-act="modsCheck"' + d + '>Check for mod updates</button>'
     + '<button data-act="modsUpdate"' + d + '>Update mods</button>'
-    + '</div>';
+    + '</div>' + updateBanner();
 
   h += '<h2>Configured mods</h2><table>'
     + '<tr><th>Name<th>Source<th>Cached<th>Used by<th></tr>'
@@ -993,7 +1065,7 @@ let painted = '';
 
 async function load() {
   try {
-    const [inst, vers, srv, health, jl, mods, glob] = await Promise.all([
+    const [inst, vers, srv, health, jl, mods, glob, upd] = await Promise.all([
       fetch('api/instances').then(r => r.json()),
       fetch('api/versions').then(r => r.json()),
       fetch('api/server').then(r => r.json()),
@@ -1001,8 +1073,10 @@ async function load() {
       fetch('api/jobs').then(r => r.json()),
       fetch('api/mods').then(r => r.json()),
       fetch('api/config/global').then(r => r.json()),
+      fetch('api/updates').then(r => r.json()),
     ]);
-    last = {instances: inst, versions: vers, server: srv, mods: mods, global: glob};
+    last = {instances: inst, versions: vers, server: srv, mods: mods, global: glob,
+            updates: upd};
     jobs = jl;
     document.getElementById('root').textContent = health.root;
 
@@ -1012,8 +1086,12 @@ async function load() {
     // age_days is recomputed server-side on every request, so it is rounded to the
     // precision actually displayed — otherwise nothing ever compares equal and the page
     // repaints forever.
+    // ago(last_checked) is included because it is what the banner shows: the timestamp
+    // itself only changes when a check runs, so without this "5 min ago" would still say
+    // that half an hour later.
     const snapshot = JSON.stringify(
-      [last, jobs, busy, location.hash, cfgEditing, assigning],
+      [last, jobs, busy, location.hash, cfgEditing, assigning,
+       ago(last.updates && last.updates.last_checked)],
       (k, v) => (k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v));
     if (snapshot === painted) return;
     // Never repaint over unsaved edits, an open assignment panel, or a search box being

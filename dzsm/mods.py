@@ -428,6 +428,36 @@ def scan_for_mods(config: Config, directory: Path) -> list[LocalCandidate]:
     ]
 
 
+def record_check(
+    config: Config, state: State, remote: dict[int, int]
+) -> dict[str, int]:
+    """Fold a check_updates answer into state. Returns mod name -> newer version available.
+
+    Separate from the request that produced `remote` so the CLI and the web daemon record
+    a check identically — otherwise checking from a terminal would leave the dashboard
+    still reporting "never checked", and the two would disagree about what is out of date.
+
+    Returns an empty dict when everything is current, which is a real answer rather than a
+    falsy failure (Rule 1).
+    """
+    behind: dict[str, int] = {}
+    for name, mod in config.mods.items():
+        if not isinstance(mod, WorkshopMod):
+            continue
+        latest = remote.get(mod.workshop_id)
+        if latest is None:
+            # Steam did not answer for this id. Not knowing is not the same as being up
+            # to date, so nothing is recorded for it.
+            continue
+        state.last_seen_remote[mod.workshop_id] = latest
+        # A pinned mod is held at a version deliberately; reporting it as behind would
+        # nag about a decision already made.
+        if mod.pinned_version is None and latest not in state.known_versions(mod.workshop_id):
+            behind[name] = latest
+    state.last_checked_at = datetime.now(UTC)
+    return behind
+
+
 def local_copy(
     config: Config,
     state: State,

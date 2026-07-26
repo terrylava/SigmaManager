@@ -83,6 +83,8 @@ EDITABLE_GLOBAL_FIELDS = frozenset(
         "mission_prefix",
         "supervise_poll_seconds",
         "stop_timeout_seconds",
+        "mod_check_interval_minutes",
+        "mod_check_auto_download",
         "allow_long_root",
         "api.host",
         "api.port",
