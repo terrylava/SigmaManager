@@ -377,7 +377,7 @@ def daemon(
     supervisor = threading.Thread(
         target=runner.supervise,
         args=(cfg, state, names),
-        kwargs={"stop": stop},
+        kwargs={"stop": stop, "config_path": config_path},
         name="dzsm-supervisor",
         daemon=True,
     )

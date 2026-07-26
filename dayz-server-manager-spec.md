@@ -481,6 +481,38 @@ The server usually dies before answering `#shutdown`, so a missing reply is not 
 failure — whether it worked is decided by watching the process, not by the reply. RCON not
 being configured, or being unreachable, simply falls through to signalling.
 
+### Editing config from the web UI
+
+Three rules, because this rewrites the file the whole tool depends on:
+
+1. **Comments survive.** The generated config explains every setting; rewriting it from a
+   parsed dict would discard all of that on the first save. Edits go through tomlkit,
+   which round-trips style.
+2. **Nothing invalid reaches disk.** A change is applied to a copy, loaded as a real
+   `Config`, and only then written. A config that fails to load is worse than a rejected
+   edit — every command stops working.
+3. **The previous version is kept** alongside as `.bak`, and the write is atomic, so a
+   valid-but-wrong change is recoverable.
+
+Instance settings are a **whitelist** (`EDITABLE_INSTANCE_FIELDS`): scalars and lists of
+scalars only, so an edit cannot restructure the document. A `null` removes the key and
+restores its default, which is what "all cores" and "leave the priority alone" actually
+mean.
+
+The running daemon adopts an edit immediately — the API rebinds its config, and the
+supervisor re-reads it each pass — so a changed schedule or affinity does not wait for a
+restart. A config left briefly unparseable by hand-editing does not take the supervisor
+down; it keeps the last one that loaded.
+
+`serverDZ.cfg` is edited as raw text and deliberately **not validated**: it is the
+engine's format, not ours, and rejecting keys dzsm does not recognise would block exactly
+the settings people come to the editor for.
+
+**A running server holds `serverDZ.cfg` open on Windows**, so replacing it fails with
+access denied — the same locking constraint the mod cache is built around, surfacing on
+the config file. That returns 409 with an explanation rather than a 500, and it costs
+nothing in practice: the change would only take effect at the next start anyway.
+
 ### Process tuning
 
 `cpu_affinity` takes **core numbers** — `[0, 1, 2, 3]` — not an affinity bitmask. Nobody

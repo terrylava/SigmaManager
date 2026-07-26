@@ -32,6 +32,26 @@
  #token { font: inherit; background: #1a1a1a; color: #ddd; border: 1px solid #333;
           border-radius: 4px; padding: .2rem .5rem; width: 14rem }
  .bar { display: flex; gap: .5rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap }
+ .panel { border: 1px solid #2c2c2c; border-radius: 6px; padding: 1rem; margin: .5rem 0 1.5rem;
+          background: #161616 }
+ .panel h3 { margin: 0 0 .8rem; font-size: .9rem; color: #bbb }
+ .field { display: flex; gap: .6rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap }
+ .field > label:first-child { width: 9rem; color: #888 }
+ .cores { display: flex; flex-wrap: wrap; gap: .35rem; max-width: 40rem }
+ .cores label { border: 1px solid #333; border-radius: 4px; padding: .1rem .45rem;
+                cursor: pointer; user-select: none; font-variant-numeric: tabular-nums }
+ .cores label.on { border-color: #2f6f4f; color: #4ade80; background: #16281c }
+ /* Hidden visually but still focusable and still in the accessibility tree.
+    display:none would drop it out of the tab order entirely. */
+ .cores input { position: absolute; opacity: 0; width: 1px; height: 1px }
+ .cores label:focus-within { outline: 2px solid #4ade80; outline-offset: 1px }
+ select, input[type=number], input[type=text] {
+   font: inherit; background: #1a1a1a; color: #ddd; border: 1px solid #333;
+   border-radius: 4px; padding: .2rem .4rem }
+ textarea { font: 12px ui-monospace, Consolas, monospace; width: 100%; min-height: 22rem;
+            background: #0d0d0d; color: #ddd; border: 1px solid #333; border-radius: 4px;
+            padding: .6rem }
+ .flags label { margin-right: 1rem; color: #ccc }
 </style>
 </head>
 <body>
@@ -95,6 +115,33 @@ async function post(path, label) {
   }
 }
 
+async function send(method, path, body, label) {
+  if (busy) return false;
+  busy = true;
+  render();
+  try {
+    const r = await fetch(path, {
+      method: method,
+      headers: Object.assign({'Content-Type': 'application/json'}, headers()),
+      body: JSON.stringify(body),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) { say(out.detail || (label + ' failed (' + r.status + ')'), true); return false; }
+    say(label + (out.applies_at_next_start ? ' saved - applies at the next start' : ' saved'));
+    return true;
+  } catch (e) {
+    say(label + ' failed: ' + e, true);
+    return false;
+  } finally {
+    busy = false;
+    painted = '';          // force a repaint: what we just saved changed the data
+    load();
+  }
+}
+
+let editing = null;        // instance name whose settings panel is open
+let cfgEditing = null;     // instance name whose serverDZ.cfg is open
+
 const act = {
   start: n => post('api/instances/' + encodeURIComponent(n) + '/start', 'Start ' + n),
   stop: n => post('api/instances/' + encodeURIComponent(n) + '/stop', 'Stop ' + n),
@@ -102,7 +149,108 @@ const act = {
   modsCheck: () => post('api/mods/check', 'Check for mod updates'),
   modsUpdate: () => post('api/mods/update', 'Mod update'),
   serverUpdate: () => post('api/server/update', 'Server app update'),
+
+  edit: n => { editing = (editing === n ? null : n); cfgEditing = null; painted = ''; render(); },
+
+  save: async n => {
+    const cores = [...document.querySelectorAll('.cores input:checked')].map(e => +e.value);
+    const num = id => {
+      const v = document.getElementById(id).value.trim();
+      return v === '' ? null : +v;
+    };
+    const sel = id => document.getElementById(id).value || null;
+    const patch = {
+      // null removes the key and restores the default, which is what "all cores" and
+      // "leave the priority alone" actually mean.
+      cpu_affinity: cores.length ? cores : null,
+      priority: sel('f-priority'),
+      cpu_count: num('f-cpucount'),
+      restart_after_hours: num('f-hours'),
+      dologs: document.getElementById('f-dologs').checked,
+      adminlog: document.getElementById('f-adminlog').checked,
+      netlog: document.getElementById('f-netlog').checked,
+      freezecheck: document.getElementById('f-freezecheck').checked,
+    };
+    if (await send('PATCH', 'api/instances/' + encodeURIComponent(n) + '/settings',
+                   patch, 'Settings for ' + n)) {
+      editing = null;
+    }
+  },
+
+  editCfg: async n => {
+    if (cfgEditing === n) { cfgEditing = null; painted = ''; render(); return; }
+    try {
+      const r = await fetch('api/instances/' + encodeURIComponent(n) + '/serverdz');
+      const out = await r.json();
+      if (!r.ok) { say(out.detail || 'could not read serverDZ.cfg', true); return; }
+      cfgEditing = n; editing = null; painted = ''; render();
+      document.getElementById('cfgtext').value = out.text;
+      document.getElementById('cfgpath').textContent = out.path;
+    } catch (e) { say('could not read serverDZ.cfg: ' + e, true); }
+  },
+
+  saveCfg: async n => {
+    const text = document.getElementById('cfgtext').value;
+    if (await send('PUT', 'api/instances/' + encodeURIComponent(n) + '/serverdz',
+                   {text: text}, 'serverDZ.cfg for ' + n)) {
+      cfgEditing = null;
+    }
+  },
 };
+
+function settingsPanel(i) {
+  const cores = [];
+  const total = last.server.cpu_count || 0;
+  for (let c = 0; c < total; c++) {
+    const on = i.cpu_affinity && i.cpu_affinity.includes(c);
+    cores.push('<label class="' + (on ? 'on' : '') + '">'
+      + '<input type="checkbox" value="' + c + '"' + (on ? ' checked' : '')
+      + ' onchange="this.parentNode.classList.toggle(\'on\', this.checked)">' + c + '</label>');
+  }
+  const opt = (v, label) =>
+    '<option value="' + v + '"' + (i.priority === v ? ' selected' : '') + '>' + label + '</option>';
+  const flag = (id, on, label) =>
+    '<label><input type="checkbox" id="f-' + id + '"' + (on ? ' checked' : '') + '> ' + label + '</label>';
+
+  return '<div class="panel"><h3>Settings for ' + esc(i.name) + '</h3>'
+    + '<div class="field"><label>CPU cores</label><div class="cores">'
+      + (total ? cores.join('') : '<span class="note">unknown</span>')
+      + '</div></div>'
+    + '<div class="field"><label>&nbsp;</label><span class="note">'
+      + 'none selected = every core</span></div>'
+    + '<div class="field"><label>Priority</label><select id="f-priority">'
+      + '<option value="">(leave alone)</option>'
+      + opt('idle', 'idle') + opt('below_normal', 'below normal') + opt('normal', 'normal')
+      + opt('above_normal', 'above normal') + opt('high', 'high') + opt('realtime', 'realtime')
+      + '</select><span class="note">raising it usually needs elevation</span></div>'
+    + '<div class="field"><label>-cpuCount</label>'
+      + '<input type="number" id="f-cpucount" min="1" style="width:5rem" value="'
+      + (i.cpu_count == null ? '' : i.cpu_count) + '">'
+      + '<span class="note">engine threads, separate from affinity</span></div>'
+    + '<div class="field"><label>Restart after</label>'
+      + '<input type="number" id="f-hours" min="0" step="0.5" style="width:5rem" value="'
+      + (i.restart_after_hours == null ? '' : i.restart_after_hours) + '">'
+      + '<span class="note">hours from start; blank disables</span></div>'
+    + '<div class="field flags"><label>Flags</label><div>'
+      + flag('dologs', i.dologs, '-dologs') + flag('adminlog', i.adminlog, '-adminlog')
+      + flag('netlog', i.netlog, '-netlog') + flag('freezecheck', i.freezecheck, '-freezecheck')
+      + '</div></div>'
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" onclick="act.save(\'' + esc(i.name) + '\')">Save</button>'
+      + '<button onclick="act.edit(\'' + esc(i.name) + '\')">Cancel</button></div>'
+    + '</div>';
+}
+
+function cfgPanel(name) {
+  return '<div class="panel"><h3>serverDZ.cfg &mdash; <span class="note" id="cfgpath"></span></h3>'
+    + '<textarea id="cfgtext" spellcheck="false"></textarea>'
+    + '<div class="field" style="margin-top:.6rem"><label>&nbsp;</label>'
+      + '<button class="primary" onclick="act.saveCfg(\'' + esc(name) + '\')">Save</button>'
+      + '<button onclick="act.editCfg(\'' + esc(name) + '\')">Cancel</button>'
+      + '<span class="note">not validated &mdash; it is the engine\'s format, so anything '
+      + 'it understands is allowed</span></div>'
+    + '</div>';
+}
 
 function instanceRow(i) {
   const pins = Object.entries(i.pins).map(([k, v]) => k + '=' + v).join(', ') || '&mdash;';
@@ -111,10 +259,12 @@ function instanceRow(i) {
     : (i.held ? '<span class="held">held down</span>' : '<span class="stop">stopped</span>');
   const n = esc(i.name);
   const d = busy ? ' disabled' : '';
-  const buttons = i.running
+  const buttons = (i.running
     ? '<button class="danger" onclick="act.stop(\'' + n + '\')"' + d + '>Stop</button>'
       + '<button onclick="act.restart(\'' + n + '\')"' + d + '>Restart</button>'
-    : '<button class="primary" onclick="act.start(\'' + n + '\')"' + d + '>Start</button>';
+    : '<button class="primary" onclick="act.start(\'' + n + '\')"' + d + '>Start</button>')
+    + '<button onclick="act.edit(\'' + n + '\')"' + d + '>Settings</button>'
+    + '<button onclick="act.editCfg(\'' + n + '\')"' + d + '>serverDZ.cfg</button>';
   const tuning = [];
   if (i.cpu_affinity) tuning.push('cores ' + i.cpu_affinity.join(','));
   if (i.priority) tuning.push(esc(i.priority));
@@ -177,8 +327,13 @@ function render() {
     + '<tr><th>Name<th>State<th>Ports<th>Pinned<th>Next restart<th></tr>';
   h += last.instances.map(instanceRow).join('');
   if (!last.instances.length) h += '<tr><td colspan="6">none configured</tr>';
+  h += '</table>';
 
-  h += '</table><h2>Cached mod versions</h2><table>'
+  const open = last.instances.find(i => i.name === editing);
+  if (open) h += settingsPanel(open);
+  if (cfgEditing) h += cfgPanel(cfgEditing);
+
+  h += '<h2>Cached mod versions</h2><table>'
     + '<tr><th>Mod<th>Version<th>Size<th>Age<th>Status</tr>';
   h += last.versions.map(versionRow).join('');
   if (!last.versions.length) h += '<tr><td colspan="5">nothing cached</tr>';
@@ -222,9 +377,12 @@ async function load() {
     // age_days is recomputed server-side on every request, so it is rounded to the
     // precision actually displayed — otherwise nothing ever compares equal and the
     // page repaints forever.
-    const snapshot = JSON.stringify([last, jobs, busy], (k, v) =>
+    const snapshot = JSON.stringify([last, jobs, busy, editing, cfgEditing], (k, v) =>
       k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v);
     if (snapshot === painted) return;
+    // Never repaint underneath an open editor: it would discard whatever has been typed
+    // into the settings panel or the serverDZ.cfg textarea.
+    if (editing || cfgEditing) return;
     if (document.activeElement && document.activeElement.id === 'token') return;
     painted = snapshot;
     render();

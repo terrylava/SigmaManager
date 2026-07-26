@@ -36,7 +36,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from dzsm import runner
+from dzsm import runner, settings
 from dzsm.config import Config, WorkshopMod, load_config
 from dzsm.instance import InstanceError
 from dzsm.mods import (
@@ -60,6 +60,12 @@ from dzsm.steam import (
 _log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-DZSM-Token"  # noqa: S105 — a header name, not a secret
+
+
+class ConfigText(BaseModel):
+    """A whole config file, submitted as text."""
+
+    text: str
 
 
 class Job(BaseModel):
@@ -121,6 +127,9 @@ def create_app(config_path: Path) -> FastAPI:
     other daemon. State is re-read on every request, because the CLI may have changed it
     from another process.
     """
+    # Rebound by the settings routes. Every route below closes over this same name, so
+    # rebinding it here is what makes an edit take effect immediately rather than at the
+    # next daemon restart.
     config = load_config(config_path)
     jobs = JobRegistry()
     app = FastAPI(
@@ -183,6 +192,12 @@ def create_app(config_path: Path) -> FastAPI:
                     "priority": instance.priority,
                     "cpu_count": instance.cpu_count,
                     "server_executable": instance.server_executable,
+                    "restart_after_hours": instance.restart_after_hours,
+                    "restart_schedule": instance.restart_schedule,
+                    "dologs": instance.dologs,
+                    "adminlog": instance.adminlog,
+                    "netlog": instance.netlog,
+                    "freezecheck": instance.freezecheck,
                     "server_build": state.server_builds.get(name),
                     "server_build_pin": instance.server_build,
                     "isolated_server": instance.isolated_server,
@@ -381,6 +396,88 @@ def create_app(config_path: Path) -> FastAPI:
         job = jobs.create("server.update")
         background.add_task(_run_server_update, config, jobs, job.id, validate)
         return job
+
+    # --- settings ------------------------------------------------------------
+
+    @app.get("/api/config")
+    def get_config() -> dict[str, Any]:
+        """The config file as text, for editing directly."""
+        return {
+            "path": str(config_path),
+            "text": settings.read_config_text(config_path),
+            "editable_instance_fields": sorted(settings.EDITABLE_INSTANCE_FIELDS),
+        }
+
+    @app.put("/api/config", dependencies=writes)
+    def put_config(body: ConfigText) -> dict[str, Any]:
+        """Replace the whole config file. Rejected unless it loads as a valid config."""
+        nonlocal config
+        try:
+            config = settings.save_raw(config_path, body.text)
+        except settings.SettingsError as exc:
+            # 422, not 500: the edit is wrong, not the server.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"saved": True, "instances": sorted(config.instances)}
+
+    @app.patch("/api/instances/{name}/settings", dependencies=writes)
+    def patch_instance(name: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Change instance settings. A null value removes the key, restoring its default.
+
+        Takes effect for the *next* start — like mod versions, nothing is changed under a
+        running server.
+        """
+        nonlocal config
+        _known_instance(config, name)
+        try:
+            document = settings.read_document(config_path)
+            settings.apply_instance_patch(document, name, body)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        state = current_state()
+        return {
+            "saved": True,
+            "applies_at_next_start": runner.is_running(config, state, name),
+        }
+
+    @app.get("/api/instances/{name}/serverdz")
+    def get_serverdz(name: str) -> dict[str, Any]:
+        """The instance's serverDZ.cfg, as text."""
+        _known_instance(config, name)
+        path = config.instance_dir(name) / config.instances[name].config_file
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"{path} does not exist yet — it is seeded the first time the "
+                f"instance starts",
+            )
+        return {"path": str(path), "text": path.read_text(encoding="utf-8", errors="replace")}
+
+    @app.put("/api/instances/{name}/serverdz", dependencies=writes)
+    def put_serverdz(name: str, body: ConfigText) -> dict[str, Any]:
+        """Replace the instance's serverDZ.cfg.
+
+        Not parsed or validated: it is the engine's format, not ours, and rejecting keys
+        dzsm does not recognise would block exactly the settings people come here to add.
+        The previous version is kept alongside it.
+        """
+        _known_instance(config, name)
+        path = config.instance_dir(name) / config.instances[name].config_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            settings.write_text(path, body.text)
+        except settings.FileLocked as exc:
+            # 409, not 500: the request is fine, the world is not ready for it.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        state = current_state()
+        return {
+            "saved": True,
+            "applies_at_next_start": runner.is_running(config, state, name),
+        }
 
     # --- dashboard -----------------------------------------------------------
 

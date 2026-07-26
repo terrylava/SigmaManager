@@ -269,6 +269,20 @@ the main one, so a Ctrl-C or service stop shuts both down. Three properties it m
   another thread of the same process; without the reload, the supervisor's older copy
   would overwrite those changes at its next save.
 
+**Config is editable from the web UI** (`dzsm/settings.py`). Three things not to break:
+edits go through **tomlkit** so comments survive, every change is **validated by loading
+it as a real Config before it touches disk**, and the previous file is kept as `.bak`.
+Instance fields are a whitelist so an edit cannot restructure the document; `null` removes
+a key and restores its default.
+
+The running daemon adopts edits live — the API rebinds `config` (every route closes over
+the same name) and the supervisor re-reads it each pass, keeping the last good one if the
+file is momentarily unparseable.
+
+**A running server holds `serverDZ.cfg` open on Windows**, so `os.replace` fails with
+access denied. That is `settings.FileLocked` → 409, not a 500: the same locking constraint
+as the mod cache, on a file nobody expects it on.
+
 **`cpu_affinity` is core numbers, not a bitmask**, and `priority` is a name, not a number
 — Windows wants priority classes while POSIX wants nice values where lower is higher, so
 the mapping lives in `runner.priority_value`. Both are applied after spawning and **never

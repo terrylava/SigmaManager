@@ -18,10 +18,11 @@ import sys
 import threading
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import psutil
 
-from dzsm.config import Config, InstanceConfig
+from dzsm.config import Config, ConfigError, InstanceConfig, load_config
 from dzsm.instance import (
     battleye_config_path,
     build_launch_args,
@@ -321,6 +322,7 @@ def supervise(
     instance_names: list[str],
     *,
     stop: threading.Event | None = None,
+    config_path: Path | None = None,
 ) -> None:
     """Run the supervision loop: restart on crash and on schedule.
 
@@ -359,6 +361,11 @@ def supervise(
                 break
             now = datetime.now()
             state = _reload(config, state)
+            # Config can be edited through the web UI while this is running; without
+            # re-reading it, a changed restart schedule or affinity would not take effect
+            # until the daemon restarted.
+            if config_path is not None:
+                config = _reload_config(config_path, config)
 
             for name in instance_names:
                 if name in state.held:
@@ -398,6 +405,19 @@ def supervise(
         _log.info("supervision interrupted; leaving instances running")
     else:
         _log.info("supervision stopped; leaving instances running")
+
+
+def _reload_config(path: Path, current: Config) -> Config:
+    """Re-read config, keeping the running one if the file is broken.
+
+    Someone editing config.toml by hand can leave it briefly unparseable. That must not
+    take down a supervisor that is otherwise perfectly able to keep servers up.
+    """
+    try:
+        return load_config(path)
+    except ConfigError as exc:
+        _log.error("config is currently invalid, continuing with the loaded one: %s", exc)
+        return current
 
 
 def _reload(config: Config, current: State) -> State:
