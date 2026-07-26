@@ -45,6 +45,7 @@ from dzsm.mods import (
     promote_snapshot,
     promote_tree,
     remove_mod,
+    scan_for_mods,
     unused_mods,
     version_status,
 )
@@ -71,6 +72,14 @@ class AddMod(BaseModel):
     # Omitted lets dzsm derive one from the Workshop title.
     name: str | None = None
     # Instances to append it to, in load order. Empty adds it to the config only.
+    instances: list[str] = []
+
+
+class AddLocalMod(BaseModel):
+    """Configuring a mod that is already on disk."""
+
+    path: str
+    name: str | None = None
     instances: list[str] = []
 
 
@@ -490,6 +499,59 @@ def create_app(config_path: Path) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return {"added": name, "workshop_id": workshop_id, "instances": body.instances}
+
+    @app.get("/api/localmods", dependencies=writes)
+    def scan_local_mods(path: str) -> dict[str, Any]:
+        """List mod folders in (or at) a directory, for mods already on disk.
+
+        Token-gated despite being a read: it enumerates the filesystem, which is a
+        different thing to expose than the mod list.
+        """
+        try:
+            candidates = scan_for_mods(config, Path(path))
+        except ModCacheError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        return {
+            "path": path,
+            "candidates": [
+                {
+                    "path": str(candidate.path),
+                    "name": candidate.name,
+                    "size_bytes": candidate.size_bytes,
+                    "has_addons": candidate.has_addons,
+                    "has_keys": candidate.has_keys,
+                    "configured_as": candidate.configured_as,
+                }
+                for candidate in candidates
+            ],
+        }
+
+    @app.post("/api/localmods/add", dependencies=writes)
+    def add_local(body: AddLocalMod) -> dict[str, Any]:
+        """Configure a mod that is already on disk. Nothing is downloaded or copied."""
+        nonlocal config
+        directory = Path(body.path)
+        if not directory.is_dir():
+            raise HTTPException(status_code=404, detail=f"{directory} is not a directory")
+
+        unknown = [name for name in body.instances if name not in config.instances]
+        if unknown:
+            raise HTTPException(
+                status_code=422, detail=f"unknown instance(s): {', '.join(unknown)}"
+            )
+
+        try:
+            document = settings.read_document(config_path)
+            name = body.name or settings.local_mod_name(directory, set(config.mods))
+            settings.add_local_mod(document, name, directory)
+            for instance_name in body.instances:
+                settings.add_mod_to_instance(document, instance_name, name)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return {"added": name, "path": str(directory), "instances": body.instances}
 
     @app.delete("/api/config/mods/{name}", dependencies=writes)
     def remove_configured_mod(name: str, force: bool = False) -> dict[str, Any]:

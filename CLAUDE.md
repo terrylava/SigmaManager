@@ -276,6 +276,17 @@ or intercepted anyway — do not try to embed it. Search needs a Web API key
 `GetPublishedFileDetails`. Keep both paths: the keyless one is what makes the browser
 usable without an API key at all.
 
+**Mods already on disk** are added as `kind = "local"` and referenced where they are —
+never copied. `GET /api/localmods` scans a folder of mods *or* a single mod folder;
+`addons/` is the marker, `@` only a hint. That scan is **token-gated despite being a
+read**, because it enumerates the filesystem.
+
+**A new `[mods.X]` carries `# added by dzsm` and blank lines on both sides.** tomlkit
+appends it at the end of the `mods` super-table's rendered span, which in a commented
+config lands *after* the section comments following the last mod — so without the label it
+reads as whatever that comment described. It cannot be repositioned; a dotted-key table
+append raises. Do not remove the label thinking it is decorative.
+
 Adding **appends** to a load order, never inserts — the order is the load order and dzsm
 cannot know where a new mod belongs. The same workshop id under two names is refused: it
 would download the mod twice and let instances pin it inconsistently.

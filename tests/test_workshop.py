@@ -267,6 +267,27 @@ def test_a_mod_added_to_no_instance_is_still_configured(config_file: Path) -> No
     assert loaded.instances["chernarus"].mods == ["CF"]
 
 
+def test_an_added_table_does_not_absorb_the_comment_above_it(tmp_path: Path) -> None:
+    """tomlkit appends after any section comments that follow the last mod, so without a
+    label the new entry looks like whatever that comment was describing."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        CONFIG + "\n# ----------\n# Instances.\n# ----------\n\n"
+        "[instances.second]\nport = 2500\nmods = []\n",
+        encoding="utf-8",
+    )
+
+    document = settings.read_document(path)
+    settings.add_workshop_mod(document, "Trader", 99)
+    settings.save(path, document)
+    text = path.read_text(encoding="utf-8")
+
+    assert "[mods.Trader] # added by dzsm" in text
+    # And it must not butt straight against the table that follows it.
+    assert "\n\n[instances.second]" in text
+    assert load_config(path).instances["second"].port == 2500
+
+
 def test_the_added_entry_is_a_workshop_mod(config_file: Path) -> None:
     document = settings.read_document(config_file)
     settings.add_workshop_mod(document, "Trader", 99)

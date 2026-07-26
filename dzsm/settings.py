@@ -15,6 +15,7 @@ on:
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import re
@@ -138,16 +139,23 @@ def mod_config_name(title: str, existing: Collection[str], workshop_id: int) -> 
     Workshop titles are full of emoji, brackets and version stamps, none of which belong
     in a name people type into a mods list.
     """
-    # A *run* of unusable characters becomes one underscore, not one each: "Trader ✅ v1"
-    # should not come out as "Trader___v1".
-    cleaned = re.sub(r"_{2,}", "_", re.sub(r"[^A-Za-z0-9_-]+", "_", title)).strip("_-")
-    candidate = cleaned[:48] or f"mod_{workshop_id}"
-    if candidate[0].isdigit():
-        candidate = f"m{candidate}"
+    candidate = _clean_name(title) or f"mod_{workshop_id}"
     if candidate not in existing:
         return candidate
     # Collisions are real: several Workshop mods share a title.
     return f"{candidate}_{workshop_id}"
+
+
+def _clean_name(text: str) -> str:
+    """Reduce arbitrary text to something usable as a config key.
+
+    A *run* of unusable characters becomes one underscore, not one each: "Trader ✅ v1"
+    should not come out as "Trader___v1".
+    """
+    cleaned = re.sub(r"_{2,}", "_", re.sub(r"[^A-Za-z0-9_-]+", "_", text)).strip("_-")[:48]
+    if cleaned and cleaned[0].isdigit():
+        cleaned = f"m{cleaned}"
+    return cleaned
 
 
 def add_workshop_mod(
@@ -164,11 +172,70 @@ def add_workshop_mod(
                 f"workshop id {workshop_id} is already configured as {existing_name!r}"
             )
 
-    entry = tomlkit.table()
+    entry = _new_mod_table()
     entry["kind"] = "workshop"
     entry["workshop_id"] = workshop_id
+    entry.add(tomlkit.nl())
     mods[name] = entry
     return document
+
+
+def add_local_mod(document: TOMLDocument, name: str, path: Path) -> TOMLDocument:
+    """Add a [mods.<name>] entry pointing at a directory already on disk.
+
+    For mods dzsm did not download: a hand-built mod, one from an existing server
+    install, or a Steam-subscribed copy. steamcmd never touches these, and they have no
+    versions — the path is used directly (spec §9).
+    """
+    mods = document.setdefault("mods", tomlkit.table(is_super_table=True))
+    if name in mods:
+        raise SettingsError(f"a mod named {name!r} is already configured")
+
+    resolved = path.resolve()
+    for existing_name, existing in mods.items():
+        if existing.get("kind") != "local":
+            continue
+        if Path(str(existing.get("path"))).resolve() == resolved:
+            raise SettingsError(f"{resolved} is already configured as {existing_name!r}")
+
+    entry = _new_mod_table()
+    entry["kind"] = "local"
+    entry["path"] = str(resolved)
+    entry.add(tomlkit.nl())
+    mods[name] = entry
+    return document
+
+
+def _new_mod_table() -> Any:
+    """A table that will read correctly wherever tomlkit decides to put it.
+
+    tomlkit appends a new sub-table at the end of the `mods` super-table's rendered span,
+    which in a commented config lands *after* whatever section comments follow the last
+    mod — so the new entry can appear to be what a comment above it describes. It cannot
+    be repositioned (a dotted-key table append is refused outright), so instead the table
+    labels itself and is separated by blank lines on both sides.
+    """
+    table = tomlkit.table()
+    table.trivia.indent = "\n"
+    table.comment("added by dzsm")
+    return table
+
+
+def local_mod_name(directory: Path, existing: Collection[str]) -> str:
+    """A config key for a local mod, from its directory name.
+
+    DayZ mod folders are conventionally "@Something"; the marker is noise in a name
+    instances refer to, so it is dropped.
+    """
+    candidate = _clean_name(directory.name.lstrip("@")) or "local_mod"
+    if candidate not in existing:
+        return candidate
+    # No workshop id to disambiguate with, so count up instead.
+    for suffix in itertools.count(2):
+        alternative = f"{candidate}_{suffix}"
+        if alternative not in existing:
+            return alternative
+    raise AssertionError("unreachable")
 
 
 def add_mod_to_instance(

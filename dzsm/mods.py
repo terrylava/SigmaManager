@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dzsm.config import Config, WorkshopMod
+from dzsm.config import Config, LocalMod, WorkshopMod
 from dzsm.state import State
 
 _log = logging.getLogger(__name__)
@@ -365,6 +365,67 @@ def kept_by(config: Config) -> dict[str, list[str]]:
         for mod_name in instance.keep_mods:
             claims.setdefault(mod_name, []).append(instance_name)
     return {name: sorted(instances) for name, instances in claims.items()}
+
+
+@dataclass(frozen=True)
+class LocalCandidate:
+    """A directory on disk that looks like a DayZ mod."""
+
+    path: Path
+    name: str
+    size_bytes: int
+    has_addons: bool
+    has_keys: bool
+    configured_as: str | None
+
+
+def looks_like_mod(path: Path) -> bool:
+    """Whether a directory is plausibly a DayZ mod.
+
+    An `addons/` directory is the real marker — that is where the PBOs live. The `@`
+    prefix is only a convention, so it is accepted as a hint but not required: plenty of
+    unpacked mods do not use it.
+    """
+    if not path.is_dir():
+        return False
+    return (path / "addons").is_dir() or (path / "Addons").is_dir() or path.name.startswith("@")
+
+
+def scan_for_mods(config: Config, directory: Path) -> list[LocalCandidate]:
+    """Find mod folders in (or at) a directory.
+
+    Handles being pointed either at a folder full of mods — a server's `!Workshop`, say —
+    or straight at a single mod folder, because both are things people will try.
+
+    Reports what is already configured so the same directory is not added twice under two
+    names.
+    """
+    if not directory.is_dir():
+        raise ModCacheError(f"{directory} is not a directory")
+
+    configured = {
+        Path(str(mod.path)).resolve(): name
+        for name, mod in config.mods.items()
+        if isinstance(mod, LocalMod)
+    }
+
+    candidates = [directory] if looks_like_mod(directory) else []
+    candidates += sorted(
+        (child for child in directory.iterdir() if looks_like_mod(child)),
+        key=lambda p: p.name.lower(),
+    )
+
+    return [
+        LocalCandidate(
+            path=path,
+            name=path.name,
+            size_bytes=_tree_size(path),
+            has_addons=(path / "addons").is_dir() or (path / "Addons").is_dir(),
+            has_keys=(path / "keys").is_dir() or (path / "Keys").is_dir(),
+            configured_as=configured.get(path.resolve()),
+        )
+        for path in dict.fromkeys(candidates)
+    ]
 
 
 def unused_mods(

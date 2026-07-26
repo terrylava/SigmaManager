@@ -511,6 +511,31 @@ the same mod twice and let two instances pin it inconsistently.
 
 Adding does not download. That is `mods update`, which is a job.
 
+### Mods already on disk
+
+Not everything comes from the Workshop through dzsm: there are mods from an existing
+server's `!Workshop`, an old install, or ones you built. `dzsm` points at those **where
+they are** — nothing is copied, nothing is downloaded, and steamcmd never touches them
+(spec §9).
+
+Scanning takes either a folder full of mods or a single mod folder, because people will
+try both. A directory counts as a mod if it has an `addons/` — that is where the PBOs
+live. The `@` prefix is accepted as a hint but not required, since plenty of unpacked mods
+do not use it.
+
+The scan endpoint is **token-gated despite being a read**: it enumerates the filesystem,
+which is a different thing to expose than the mod list.
+
+Adding the same folder twice under two names is refused, the same way a duplicate workshop
+id is: it would load the same mod twice.
+
+**A new `[mods.X]` table labels itself `# added by dzsm` and is blank-line separated.**
+tomlkit appends a sub-table at the end of the `mods` super-table's *rendered* span, which
+in a commented config lands after whatever section comments follow the last mod — so the
+new entry can look like whatever the comment above it describes. It cannot be
+repositioned; a dotted-key table append is refused outright. The label and spacing are the
+fix.
+
 ### Editing config from the web UI
 
 Three rules, because this rewrites the file the whole tool depends on:

@@ -330,6 +330,86 @@ function modRow(m) {
     + '</tr>';
 }
 
+let localHits = null;
+let localPath = '';
+
+async function scanLocal() {
+  const path = document.getElementById('lp').value.trim();
+  if (!path) return;
+  localPath = path;
+  busy = true; painted = ''; render();
+  try {
+    const r = await fetch('api/localmods?path=' + encodeURIComponent(path), {headers: headers()});
+    const out = await r.json();
+    if (!r.ok) { say(out.detail || 'scan failed', true); localHits = []; }
+    else { localHits = out.candidates; }
+  } catch (e) {
+    say('scan failed: ' + e, true); localHits = [];
+  } finally {
+    busy = false; painted = ''; render();
+  }
+}
+
+async function addLocal(path) {
+  // Its own checkboxes, not the Workshop panel's: ticking boxes in one panel must not
+  // silently apply to an Add in the other.
+  const targets = [...document.querySelectorAll('.ltargets input:checked')].map(e => e.value);
+  if (await send('POST', 'api/localmods/add', {path: path, instances: targets},
+                 'Add local mod')) {
+    localHits = null;
+  }
+}
+
+function localRow(c) {
+  const flags = [];
+  if (!c.has_addons) flags.push('<span class="warn">no addons/</span>');
+  if (c.has_keys) flags.push('has keys');
+  const action = c.configured_as
+    ? '<span class="run">added as ' + esc(c.configured_as) + '</span>'
+    : '<button class="primary" onclick="addLocal(' + JSON.stringify(c.path) + ')"'
+      + (busy ? ' disabled' : '') + '>Add</button>';
+  return '<div class="hit">'
+    + '<div class="body">'
+      + '<div class="title">' + esc(c.name) + '</div>'
+      + '<div class="meta">' + esc(c.path) + '</div>'
+      + '<div class="meta">' + mib(c.size_bytes)
+        + (flags.length ? ' &middot; ' + flags.join(' &middot; ') : '') + '</div>'
+    + '</div>'
+    + '<div class="act">' + action + '</div>'
+  + '</div>';
+}
+
+function localPanel() {
+  let h = '<h2>Already downloaded</h2><div class="panel">'
+    + '<p class="note">Mods already on disk &mdash; a server\'s !Workshop folder, an old '
+    + 'install, or one you built. dzsm points at them where they are: nothing is copied '
+    + 'or downloaded, and steamcmd never touches them.</p>'
+    + '<div class="field">'
+      + '<input type="text" id="lp" placeholder="Folder to scan, or a single mod folder"'
+      + ' style="flex:1;min-width:18rem" oninput="localPath=this.value"'
+      + ' onkeydown="if(event.key===\'Enter\')scanLocal()">'
+      + '<button onclick="scanLocal()"' + (busy ? ' disabled' : '') + '>Scan</button>'
+    + '</div>';
+
+  if (last.instances.length) {
+    h += '<div class="field"><label>Add to</label><div class="targets ltargets">'
+       + last.instances.map(i =>
+           '<label><input type="checkbox" value="' + esc(i.name) + '"> ' + esc(i.name) + '</label>'
+         ).join('')
+       + '<span class="note">leave all unticked to add it to the config only</span>'
+       + '</div></div>';
+  }
+
+  if (localHits === null) {
+    h += '<p class="note">Nothing scanned yet.</p>';
+  } else if (!localHits.length) {
+    h += '<p class="note">no mod folders found in ' + esc(localPath) + '</p>';
+  } else {
+    h += localHits.map(localRow).join('');
+  }
+  return h + '</div>';
+}
+
 function workshopPanel() {
   const targets = last.instances.map(i =>
     '<label><input type="checkbox" value="' + esc(i.name) + '"> ' + esc(i.name) + '</label>'
@@ -510,7 +590,7 @@ function render() {
   if (!last.mods.length) h += '<tr><td colspan="5">none configured</tr>';
   h += '</table>';
 
-  h += workshopPanel();
+  h += workshopPanel() + localPanel();
 
   h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
@@ -528,6 +608,8 @@ function render() {
   box.addEventListener('change', e => sessionStorage.setItem('dzsm-token', e.target.value));
   const qbox = document.getElementById('q');
   if (qbox) qbox.value = pendingQuery;
+  const lbox = document.getElementById('lp');
+  if (lbox) lbox.value = localPath;
   renderJobs();
 }
 
@@ -561,7 +643,7 @@ async function load() {
     // into the settings panel or the serverDZ.cfg textarea.
     if (editing || cfgEditing) return;
     const focused = document.activeElement && document.activeElement.id;
-    if (focused === 'token' || focused === 'q') return;
+    if (focused === 'token' || focused === 'q' || focused === 'lp') return;
     painted = snapshot;
     render();
   } catch (e) {
