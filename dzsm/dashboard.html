@@ -52,6 +52,17 @@
             background: #0d0d0d; color: #ddd; border: 1px solid #333; border-radius: 4px;
             padding: .6rem }
  .flags label { margin-right: 1rem; color: #ccc }
+ .hit { display: flex; gap: .8rem; padding: .7rem 0; border-bottom: 1px solid #222 }
+ .hit img { width: 96px; height: 54px; object-fit: cover; border-radius: 4px;
+            background: #222; flex: none }
+ .hit .body { flex: 1; min-width: 0 }
+ .hit .title { font-weight: 600 }
+ .hit .desc { color: #888; font-size: .85rem; margin: .2rem 0;
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+              overflow: hidden }
+ .hit .meta { color: #666; font-size: .8rem }
+ .hit .act { flex: none; text-align: right }
+ .targets label { display: block; color: #ccc; font-size: .85rem }
 </style>
 </head>
 <body>
@@ -198,6 +209,107 @@ const act = {
   },
 };
 
+let hits = null;          // null = the browser has not been used yet
+let hitsTotal = 0;
+let hitsQuery = '';
+let pendingQuery = '';    // survives a repaint, so a background refresh cannot eat it
+
+const WORKSHOP_ID = /(?:id=)?(\d{6,})/;   // bare id, or one pulled out of a Workshop URL
+
+async function searchWorkshop() {
+  const raw = document.getElementById('q').value.trim();
+  if (!raw) return;
+  hitsQuery = raw;
+
+  // A pasted link or a bare id is a lookup, not a search - and that path needs no API
+  // key, so it works for people who never made one.
+  const direct = raw.match(/^\s*(?:https?:\/\/\S*[?&]id=)?(\d{6,})\s*$/);
+  const url = direct
+    ? 'api/workshop/' + direct[1]
+    : 'api/workshop/search?q=' + encodeURIComponent(raw);
+
+  busy = true; painted = ''; render();
+  try {
+    const r = await fetch(url, {headers: headers()});
+    const out = await r.json();
+    if (!r.ok) { say(out.detail || 'search failed', true); hits = []; }
+    else if (direct) { hits = [out]; hitsTotal = 1; }
+    else { hits = out.items; hitsTotal = out.total; }
+  } catch (e) {
+    say('search failed: ' + e, true); hits = [];
+  } finally {
+    busy = false; painted = ''; render();
+  }
+}
+
+async function addMod(id) {
+  const targets = [...document.querySelectorAll('.targets input:checked')].map(e => e.value);
+  if (await send('POST', 'api/workshop/' + id + '/add', {instances: targets},
+                 'Add mod ' + id)) {
+    hits = null;                       // the results are stale once it is configured
+    document.getElementById('q').value = '';
+  }
+}
+
+function hitRow(h) {
+  const img = h.preview_url
+    ? '<img src="' + esc(h.preview_url) + '" alt="" loading="lazy">'
+    : '<img alt="">';
+  const meta = [];
+  if (h.subscriptions) meta.push(h.subscriptions.toLocaleString() + ' subscribers');
+  if (h.file_size) meta.push(mib(h.file_size));
+  if (h.time_updated) meta.push('updated ' + new Date(h.time_updated * 1000).toISOString().slice(0, 10));
+  meta.push('id ' + h.workshop_id);
+
+  const action = h.configured_as
+    ? '<span class="run">added as ' + esc(h.configured_as) + '</span>'
+    : '<button class="primary" onclick="addMod(' + h.workshop_id + ')"'
+      + (busy ? ' disabled' : '') + '>Add</button>';
+
+  return '<div class="hit">' + img
+    + '<div class="body">'
+      + '<div class="title">' + esc(h.title) + '</div>'
+      + '<div class="desc">' + esc(h.description) + '</div>'
+      + '<div class="meta">' + esc(meta.join(' &middot; ')).replace(/&amp;middot;/g, '&middot;') + '</div>'
+    + '</div>'
+    + '<div class="act">' + action + '</div>'
+  + '</div>';
+}
+
+function workshopPanel() {
+  const targets = last.instances.map(i =>
+    '<label><input type="checkbox" value="' + esc(i.name) + '"> ' + esc(i.name) + '</label>'
+  ).join('');
+
+  let h = '<h2>Workshop</h2><div class="panel">'
+    + '<div class="field">'
+      + '<input type="text" id="q" placeholder="Search, or paste a Workshop link or id"'
+      + ' style="flex:1;min-width:18rem" oninput="pendingQuery=this.value"'
+      + ' onkeydown="if(event.key===\'Enter\')searchWorkshop()">'
+      + '<button onclick="searchWorkshop()"' + (busy ? ' disabled' : '') + '>Search</button>'
+    + '</div>';
+
+  if (last.instances.length) {
+    h += '<div class="field"><label>Add to</label><div class="targets">' + targets
+       + '<span class="note">leave all unticked to add it to the config only</span>'
+       + '</div></div>';
+  }
+
+  if (hits === null) {
+    h += '<p class="note">Searching needs a Steam Web API key. Pasting a link or an id '
+       + 'does not, so that works either way.</p>';
+  } else if (!hits.length) {
+    h += '<p class="note">nothing found for &ldquo;' + esc(hitsQuery) + '&rdquo;</p>';
+  } else {
+    h += hits.map(hitRow).join('');
+    if (hitsTotal > hits.length) {
+      h += '<p class="note">showing ' + hits.length + ' of ' + hitsTotal.toLocaleString()
+         + ' &mdash; narrow the search to see more</p>';
+    }
+  }
+  return h + '</div>';
+}
+
 function settingsPanel(i) {
   const cores = [];
   const total = last.server.cpu_count || 0;
@@ -338,7 +450,9 @@ function render() {
   h += last.versions.map(versionRow).join('');
   if (!last.versions.length) h += '<tr><td colspan="5">nothing cached</tr>';
 
-  h += '</table><h2>Server app</h2><table><tr><th>Build<th></tr>';
+  h += '</table>' + workshopPanel();
+
+  h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
     '<tr><td><code>' + esc(b) + '</code><td>' + (b === last.server.active ? 'newest' : '') + '</tr>'
   ).join('');
@@ -352,6 +466,8 @@ function render() {
   const box = document.getElementById('token');
   box.value = token();
   box.addEventListener('change', e => sessionStorage.setItem('dzsm-token', e.target.value));
+  const qbox = document.getElementById('q');
+  if (qbox) qbox.value = pendingQuery;
   renderJobs();
 }
 
@@ -383,7 +499,8 @@ async function load() {
     // Never repaint underneath an open editor: it would discard whatever has been typed
     // into the settings panel or the serverDZ.cfg textarea.
     if (editing || cfgEditing) return;
-    if (document.activeElement && document.activeElement.id === 'token') return;
+    const focused = document.activeElement && document.activeElement.id;
+    if (focused === 'token' || focused === 'q') return;
     painted = snapshot;
     render();
   } catch (e) {

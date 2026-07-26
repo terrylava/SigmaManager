@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 import tomllib
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +127,70 @@ def apply_instance_patch(
             table.pop(key, None)
         else:
             table[key] = value
+    return document
+
+
+def mod_config_name(title: str, existing: Collection[str], workshop_id: int) -> str:
+    """A config key for a Workshop mod, derived from its title.
+
+    Keys are what instances refer to, so they have to be stable, readable, and unique.
+    Anything outside letters, digits, underscore and dash is dropped rather than escaped —
+    Workshop titles are full of emoji, brackets and version stamps, none of which belong
+    in a name people type into a mods list.
+    """
+    # A *run* of unusable characters becomes one underscore, not one each: "Trader ✅ v1"
+    # should not come out as "Trader___v1".
+    cleaned = re.sub(r"_{2,}", "_", re.sub(r"[^A-Za-z0-9_-]+", "_", title)).strip("_-")
+    candidate = cleaned[:48] or f"mod_{workshop_id}"
+    if candidate[0].isdigit():
+        candidate = f"m{candidate}"
+    if candidate not in existing:
+        return candidate
+    # Collisions are real: several Workshop mods share a title.
+    return f"{candidate}_{workshop_id}"
+
+
+def add_workshop_mod(
+    document: TOMLDocument, name: str, workshop_id: int
+) -> TOMLDocument:
+    """Add a [mods.<name>] entry. Refuses to overwrite an existing one."""
+    mods = document.setdefault("mods", tomlkit.table(is_super_table=True))
+    if name in mods:
+        raise SettingsError(f"a mod named {name!r} is already configured")
+
+    for existing_name, existing in mods.items():
+        if existing.get("workshop_id") == workshop_id:
+            raise SettingsError(
+                f"workshop id {workshop_id} is already configured as {existing_name!r}"
+            )
+
+    entry = tomlkit.table()
+    entry["kind"] = "workshop"
+    entry["workshop_id"] = workshop_id
+    mods[name] = entry
+    return document
+
+
+def add_mod_to_instance(
+    document: TOMLDocument, instance_name: str, mod_name: str
+) -> TOMLDocument:
+    """Append a mod to an instance's load order.
+
+    Appended, never inserted: the order is the load order, and dzsm has no way to know
+    where a new mod belongs relative to the frameworks already listed.
+    """
+    instances = document.get("instances")
+    if instances is None or instance_name not in instances:
+        raise SettingsError(f"no instance {instance_name!r} in the config")
+
+    table = instances[instance_name]
+    mods = table.get("mods")
+    if mods is None:
+        mods = tomlkit.array()
+        table["mods"] = mods
+    if mod_name in list(mods):
+        return document
+    mods.append(mod_name)
     return document
 
 

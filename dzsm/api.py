@@ -51,8 +51,11 @@ from dzsm.mods import (
 from dzsm.state import State, load_state, save_state
 from dzsm.steam import (
     SteamError,
+    WorkshopItem,
     check_updates,
     download_mod,
+    get_workshop_item,
+    search_workshop,
     update_server_app,
     verify_download,
 )
@@ -60,6 +63,15 @@ from dzsm.steam import (
 _log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-DZSM-Token"  # noqa: S105 — a header name, not a secret
+
+
+class AddMod(BaseModel):
+    """Adding a Workshop mod to the config."""
+
+    # Omitted lets dzsm derive one from the Workshop title.
+    name: str | None = None
+    # Instances to append it to, in load order. Empty adds it to the config only.
+    instances: list[str] = []
 
 
 class ConfigText(BaseModel):
@@ -397,6 +409,87 @@ def create_app(config_path: Path) -> FastAPI:
         background.add_task(_run_server_update, config, jobs, job.id, validate)
         return job
 
+    # --- workshop ------------------------------------------------------------
+
+    @app.get("/api/workshop/search")
+    def workshop_search(q: str, page: int = 1) -> dict[str, Any]:
+        """Search the DayZ Workshop.
+
+        Steam's own page cannot be embedded — it sends frame-ancestors headers, and a
+        cross-origin frame could not be read from anyway — so this is our own search over
+        their Web API.
+        """
+        state = current_state()
+        try:
+            items, total = search_workshop(config.steam.api_key(), q, page=page)
+        except SteamError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        configured = {
+            mod.workshop_id: name
+            for name, mod in config.mods.items()
+            if isinstance(mod, WorkshopMod)
+        }
+        return {
+            "total": total,
+            "page": page,
+            "items": [_workshop_json(item, configured, state) for item in items],
+        }
+
+    @app.get("/api/workshop/{workshop_id}")
+    def workshop_item(workshop_id: int) -> dict[str, Any]:
+        """One item by id. Needs no API key, so pasting a Workshop link always works."""
+        state = current_state()
+        try:
+            item = get_workshop_item(workshop_id)
+        except SteamError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"no Workshop item {workshop_id}")
+
+        configured = {
+            mod.workshop_id: name
+            for name, mod in config.mods.items()
+            if isinstance(mod, WorkshopMod)
+        }
+        return _workshop_json(item, configured, state)
+
+    @app.post("/api/workshop/{workshop_id}/add", dependencies=writes)
+    def workshop_add(workshop_id: int, body: AddMod) -> dict[str, Any]:
+        """Add a Workshop mod to the config, optionally to some instances' load order.
+
+        Does not download it: that is `mods update`, which is a job. Appended to a load
+        order rather than inserted, because dzsm cannot know where a new mod belongs
+        relative to the frameworks already there.
+        """
+        nonlocal config
+        try:
+            item = get_workshop_item(workshop_id)
+        except SteamError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"no Workshop item {workshop_id}")
+
+        unknown = [name for name in body.instances if name not in config.instances]
+        if unknown:
+            raise HTTPException(
+                status_code=422, detail=f"unknown instance(s): {', '.join(unknown)}"
+            )
+
+        try:
+            document = settings.read_document(config_path)
+            name = body.name or settings.mod_config_name(
+                item.title, set(config.mods), workshop_id
+            )
+            settings.add_workshop_mod(document, name, workshop_id)
+            for instance_name in body.instances:
+                settings.add_mod_to_instance(document, instance_name, name)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return {"added": name, "workshop_id": workshop_id, "instances": body.instances}
+
     # --- settings ------------------------------------------------------------
 
     @app.get("/api/config")
@@ -503,6 +596,27 @@ def _dashboard_path() -> Path:
     if bundle is not None:
         return Path(bundle) / "dzsm" / "dashboard.html"
     return Path(__file__).parent / "dashboard.html"
+
+
+def _workshop_json(
+    item: WorkshopItem, configured: dict[int, str], state: State
+) -> dict[str, Any]:
+    """One search result, plus what dzsm already knows about it.
+
+    `configured` and `cached` are what let the browser show "already added" instead of
+    offering to add something twice.
+    """
+    return {
+        "workshop_id": item.workshop_id,
+        "title": item.title,
+        "description": item.description,
+        "preview_url": item.preview_url,
+        "time_updated": item.time_updated,
+        "subscriptions": item.subscriptions,
+        "file_size": item.file_size,
+        "configured_as": configured.get(item.workshop_id),
+        "cached_versions": state.known_versions(item.workshop_id),
+    }
 
 
 def _known_instance(config: Config, name: str) -> None:

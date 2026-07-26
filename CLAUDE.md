@@ -269,6 +269,17 @@ the main one, so a Ctrl-C or service stop shuts both down. Three properties it m
   another thread of the same process; without the reload, the supervisor's older copy
   would overwrite those changes at its next save.
 
+**The Workshop browser is our own UI, not Steam's page.** `steamcommunity.com` sends
+frame-ancestors headers so it cannot be framed, and a cross-origin frame could not be read
+or intercepted anyway — do not try to embed it. Search needs a Web API key
+(`steam.api_key_env`); **pasting a link or id does not**, because that uses the public
+`GetPublishedFileDetails`. Keep both paths: the keyless one is what makes the browser
+usable without an API key at all.
+
+Adding **appends** to a load order, never inserts — the order is the load order and dzsm
+cannot know where a new mod belongs. The same workshop id under two names is refused: it
+would download the mod twice and let instances pin it inconsistently.
+
 **Config is editable from the web UI** (`dzsm/settings.py`). Three things not to break:
 edits go through **tomlkit** so comments survive, every change is **validated by loading
 it as a real Config before it touches disk**, and the previous file is kept as `.bak`.

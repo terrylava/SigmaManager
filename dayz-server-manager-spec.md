@@ -481,6 +481,36 @@ The server usually dies before answering `#shutdown`, so a missing reply is not 
 failure — whether it worked is decided by watching the process, not by the reply. RCON not
 being configured, or being unreachable, simply falls through to signalling.
 
+### The Workshop browser
+
+**Steam's own page cannot be embedded.** `steamcommunity.com` sends frame-ancestors
+headers that stop a browser rendering it in a frame at all, and even if it loaded,
+same-origin policy means a cross-origin frame's DOM cannot be read and its buttons cannot
+be intercepted. That is a browser security boundary, not a difficult problem. So the
+browser is dzsm's own UI over Steam's Web API.
+
+Two paths, and only one needs a key:
+
+- **Search** uses `IPublishedFileService/QueryFiles`, which requires a Steam Web API key
+  (`steam.api_key_env`, from steamcommunity.com/dev/apikey).
+- **Pasting a Workshop link or a bare id** uses the public `GetPublishedFileDetails` —
+  the same endpoint the update check already used, with **no key at all**. So the browser
+  is useful to someone who never creates one, which is why the search box accepts both.
+
+Adding a mod writes a `[mods.<name>]` entry and optionally appends it to instances' load
+orders. It **appends, never inserts**: the order is the load order and dzsm cannot know
+where a new mod belongs relative to the frameworks already listed.
+
+Config names are derived from the Workshop title, stripped to letters, digits, underscore
+and dash — titles are full of emoji, brackets and version stamps, none of which belong in
+a name people type into a mods list. A run of unusable characters collapses to one
+underscore rather than one each. Duplicate titles get the workshop id appended.
+
+Adding the **same workshop id twice under different names** is refused: it would download
+the same mod twice and let two instances pin it inconsistently.
+
+Adding does not download. That is `mods update`, which is a job.
+
 ### Editing config from the web UI
 
 Three rules, because this rewrites the file the whole tool depends on:

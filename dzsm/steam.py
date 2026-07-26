@@ -18,6 +18,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -33,6 +34,9 @@ STEAMCMD_LINUX_URL = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_
 GET_PUBLISHED_FILE_DETAILS = (
     "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
 )
+
+# Workshop search. The only Steam endpoint here that needs a Web API key.
+QUERY_FILES = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
 
 # Substrings in steamcmd output that mean the run failed regardless of exit code.
 STEAMCMD_ERROR_MARKERS = (
@@ -169,6 +173,139 @@ def check_updates(
         updates[workshop_id] = int(time_updated)
 
     return updates
+
+
+@dataclass(frozen=True)
+class WorkshopItem:
+    """One Workshop entry, as much of it as the browser needs."""
+
+    workshop_id: int
+    title: str
+    description: str
+    preview_url: str | None
+    time_updated: int | None
+    subscriptions: int | None
+    file_size: int | None
+
+
+def search_workshop(
+    api_key: str | None,
+    text: str,
+    *,
+    page: int = 1,
+    per_page: int = 20,
+    timeout: float = 30.0,
+    client: httpx.Client | None = None,
+) -> tuple[list[WorkshopItem], int]:
+    """Search the DayZ Workshop. Returns (items, total matches).
+
+    This is the one Steam endpoint dzsm uses that needs a Web API key — looking up mods
+    whose ids are already known does not, which is why everything else works without one.
+
+    Steam's page is not embeddable (it sends frame-ancestors headers, and a cross-origin
+    frame could not be read from anyway), so the browser is built over this instead.
+
+    Returns an empty list for an empty query rather than fetching the whole Workshop.
+    """
+    if not text.strip():
+        return [], 0
+    if not api_key:
+        raise SteamError(
+            "searching the Workshop needs a Steam Web API key. Get one from "
+            "https://steamcommunity.com/dev/apikey and set it in the environment "
+            "variable named by steam.api_key_env."
+        )
+
+    params = {
+        "key": api_key,
+        "appid": str(WORKSHOP_APPID),
+        "search_text": text,
+        # 9 = ranked by text search relevance, which is what a search box should do.
+        "query_type": "9",
+        "page": str(max(1, page)),
+        "numperpage": str(per_page),
+        "filetype": "0",
+        "return_short_description": "true",
+        "return_previews": "true",
+        "return_metadata": "true",
+        "strip_description_bbcode": "true",
+    }
+
+    owns_client = client is None
+    http = client if client is not None else httpx.Client(timeout=timeout)
+    try:
+        response = http.get(QUERY_FILES, params=params)
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (401, 403):
+            raise SteamError(
+                "Steam rejected the Web API key. Check the value in the environment "
+                "variable named by steam.api_key_env."
+            ) from exc
+        raise SteamError(f"Workshop search failed: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise SteamError(f"Workshop search failed: {exc}") from exc
+    except ValueError as exc:
+        raise SteamError(f"Workshop search returned non-JSON: {exc}") from exc
+    finally:
+        if owns_client:
+            http.close()
+
+    body = payload.get("response", {})
+    return [_item(entry) for entry in body.get("publishedfiledetails") or []], int(
+        body.get("total", 0)
+    )
+
+
+def get_workshop_item(
+    workshop_id: int,
+    *,
+    timeout: float = 30.0,
+    client: httpx.Client | None = None,
+) -> WorkshopItem | None:
+    """One Workshop item by id. No API key needed — this is the public endpoint.
+
+    So pasting a Workshop link works even without a key, which is the fallback when
+    someone does not want to create one.
+    """
+    owns_client = client is None
+    http = client if client is not None else httpx.Client(timeout=timeout)
+    try:
+        response = http.post(
+            GET_PUBLISHED_FILE_DETAILS,
+            data={"itemcount": "1", "publishedfileids[0]": str(workshop_id)},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPError as exc:
+        raise SteamError(f"Workshop lookup failed: {exc}") from exc
+    except ValueError as exc:
+        raise SteamError(f"Workshop lookup returned non-JSON: {exc}") from exc
+    finally:
+        if owns_client:
+            http.close()
+
+    details = payload.get("response", {}).get("publishedfiledetails") or []
+    if not details or details[0].get("result") != _RESULT_OK:
+        return None
+    return _item(details[0])
+
+
+def _item(entry: dict[str, Any]) -> WorkshopItem:
+    def number(key: str) -> int | None:
+        value = entry.get(key)
+        return int(value) if isinstance(value, (int, str)) and str(value).isdigit() else None
+
+    return WorkshopItem(
+        workshop_id=int(entry["publishedfileid"]),
+        title=str(entry.get("title") or f"({entry['publishedfileid']})"),
+        description=str(entry.get("short_description") or entry.get("description") or ""),
+        preview_url=entry.get("preview_url"),
+        time_updated=number("time_updated"),
+        subscriptions=number("subscriptions") or number("lifetime_subscriptions"),
+        file_size=number("file_size"),
+    )
 
 
 def ensure_steamcmd(

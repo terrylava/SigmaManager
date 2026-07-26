@@ -57,19 +57,19 @@ def _routes(client: TestClient) -> set[str]:
 
 
 def test_every_path_the_page_fetches_exists(client: TestClient) -> None:
-    """A typo here renders a button that 404s on click and explains nothing."""
+    """A typo here renders a button that 404s on click and explains nothing.
+
+    Several paths are built by concatenation — 'api/instances/' + name + '/start' — so a
+    reference is satisfied either by an exact route or by being a prefix of one.
+    """
     html = _dashboard_html()
-    referenced = {"/api/" + m.rstrip("/") for m in FETCH.findall(html)}
+    referenced = {"/api/" + match.rstrip("/") for match in FETCH.findall(html)}
     served = _routes(client)
 
-    # Instance actions are built as 'api/instances/' + name + '/start'.
-    concrete = {p for p in referenced if not p.endswith("/instances")}
-    missing = {
-        path
-        for path in concrete
-        if path not in served
-        and not any(s.replace("{name}", "").rstrip("/") == path.rstrip("/") for s in served)
-    }
+    def satisfied(path: str) -> bool:
+        return path in served or any(route.startswith(path + "/") for route in served)
+
+    missing = {path for path in referenced if not satisfied(path)}
 
     assert missing == set(), f"dashboard fetches routes that do not exist: {missing}"
 
