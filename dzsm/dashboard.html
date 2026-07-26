@@ -310,10 +310,72 @@ function usersOf(name) {
     .map(i => i.name);
 }
 
+let assigning = null;      // mod name whose assign panel is open
+
+function listContaining(instance, name) {
+  if ((instance.mods || []).includes(name)) return 'mods';
+  if ((instance.server_mods || []).includes(name)) return 'server_mods';
+  if ((instance.keep_mods || []).includes(name)) return 'keep_mods';
+  return null;
+}
+
+const act2 = {
+  assign: n => { assigning = (assigning === n ? null : n); editing = null; cfgEditing = null;
+                 painted = ''; render(); },
+
+  saveAssign: async n => {
+    const list = document.getElementById('a-list').value;
+    const targets = [...document.querySelectorAll('.atargets input:checked')].map(e => e.value);
+    if (await send('PATCH', 'api/config/mods/' + encodeURIComponent(n) + '/instances',
+                   {instances: targets, list_name: list}, 'Assignment for ' + n)) {
+      assigning = null;
+    }
+  },
+};
+
+function assignPanel(name) {
+  // Preselect the list the mod is already in somewhere, so opening the panel and saving
+  // without touching anything is a no-op rather than a silent move to "mods".
+  const current = last.instances.map(i => listContaining(i, name)).find(Boolean) || 'mods';
+  const opt = (v, label) =>
+    '<option value="' + v + '"' + (current === v ? ' selected' : '') + '>' + label + '</option>';
+
+  const boxes = last.instances.map(i => {
+    const where = listContaining(i, name);
+    const on = where === current;
+    const note = where && where !== current
+      ? ' <span class="note">(currently ' + where + ')</span>' : '';
+    return '<label><input type="checkbox" value="' + esc(i.name) + '"'
+      + (on ? ' checked' : '') + '> ' + esc(i.name) + note + '</label>';
+  }).join('');
+
+  return '<div class="panel"><h3>Which servers load ' + esc(name) + '?</h3>'
+    + '<div class="field"><label>As</label><select id="a-list">'
+      + opt('mods', 'loaded (-mod)')
+      + opt('server_mods', 'server only (-serverMod)')
+      + opt('keep_mods', 'kept, not loaded')
+    + '</select></div>'
+    + '<div class="field"><label>Servers</label><div class="targets atargets">' + boxes
+      + (last.instances.length ? '' : '<span class="note">no instances configured</span>')
+      + '</div></div>'
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" onclick="act2.saveAssign(' + JSON.stringify(name) + ')">Save</button>'
+      + '<button onclick="act2.assign(' + JSON.stringify(name) + ')">Cancel</button>'
+      + '<span class="note">unticking removes it from that list only</span></div>'
+    + '</div>';
+}
+
 function modRow(m) {
   const users = usersOf(m.name);
+  // Which list each one carries it in, since "used by" alone hides a real difference
+  // between loaded, server-only and merely kept.
   const where = users.length
-    ? esc(users.join(', '))
+    ? users.map(u => {
+        const list = listContaining(last.instances.find(i => i.name === u), m.name);
+        const label = list === 'server_mods' ? ' <span class="note">(server only)</span>'
+                    : list === 'keep_mods' ? ' <span class="note">(kept)</span>' : '';
+        return esc(u) + label;
+      }).join(', ')
     : '<span class="warn">no instance uses it</span>';
   const cached = (m.cached_versions || []).length
     ? '<code>' + m.cached_versions[0] + '</code>'
@@ -325,7 +387,9 @@ function modRow(m) {
     + '<td><code>' + esc(id) + '</code>'
     + '<td>' + cached
     + '<td>' + where
-    + '<td><button class="danger" onclick="removeMod(' + JSON.stringify(m.name) + ','
+    + '<td><button onclick="act2.assign(' + JSON.stringify(m.name) + ')"'
+      + (busy ? ' disabled' : '') + '>Servers</button>'
+      + '<button class="danger" onclick="removeMod(' + JSON.stringify(m.name) + ','
       + JSON.stringify(users) + ')"' + (busy ? ' disabled' : '') + '>Remove</button>'
     + '</tr>';
 }
@@ -590,6 +654,8 @@ function render() {
   if (!last.mods.length) h += '<tr><td colspan="5">none configured</tr>';
   h += '</table>';
 
+  if (assigning && last.mods.some(m => m.name === assigning)) h += assignPanel(assigning);
+
   h += workshopPanel() + localPanel();
 
   h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
@@ -636,12 +702,13 @@ async function load() {
     // age_days is recomputed server-side on every request, so it is rounded to the
     // precision actually displayed — otherwise nothing ever compares equal and the
     // page repaints forever.
-    const snapshot = JSON.stringify([last, jobs, busy, editing, cfgEditing], (k, v) =>
-      k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v);
+    const snapshot = JSON.stringify(
+      [last, jobs, busy, editing, cfgEditing, assigning],
+      (k, v) => (k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v));
     if (snapshot === painted) return;
     // Never repaint underneath an open editor: it would discard whatever has been typed
-    // into the settings panel or the serverDZ.cfg textarea.
-    if (editing || cfgEditing) return;
+    // into a panel or the serverDZ.cfg textarea, or reset half-ticked checkboxes.
+    if (editing || cfgEditing || assigning) return;
     const focused = document.activeElement && document.activeElement.id;
     if (focused === 'token' || focused === 'q' || focused === 'lp') return;
     painted = snapshot;

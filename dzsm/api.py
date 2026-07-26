@@ -75,6 +75,17 @@ class AddMod(BaseModel):
     instances: list[str] = []
 
 
+class AssignMod(BaseModel):
+    """Which instances carry a configured mod, in which of their three lists."""
+
+    instances: list[str] = []
+    # "mods" (client-facing), "server_mods" (-serverMod), or "keep_mods" (retained but
+    # not loaded). Named list_name, not list: a field called `list` shadows the builtin
+    # inside the class body, so pydantic resolves the sibling `list[str]` annotation
+    # against this field's default and fails at import.
+    list_name: str = "mods"
+
+
 class AddLocalMod(BaseModel):
     """Configuring a mod that is already on disk."""
 
@@ -552,6 +563,37 @@ def create_app(config_path: Path) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return {"added": name, "path": str(directory), "instances": body.instances}
+
+    @app.patch("/api/config/mods/{name}/instances", dependencies=writes)
+    def assign_mod(name: str, body: AssignMod) -> dict[str, Any]:
+        """Set which instances carry an already-configured mod.
+
+        Ticked instances gain it, unticked ones lose it from that list only. Takes effect
+        at each instance's next start, like every other activation decision.
+        """
+        nonlocal config
+        if name not in config.mods:
+            raise HTTPException(status_code=404, detail=f"no mod named {name!r}")
+
+        try:
+            document = settings.read_document(config_path)
+            settings.set_mod_instances(document, name, body.list_name, body.instances)
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        state = current_state()
+        running = [
+            instance
+            for instance in body.instances
+            if runner.is_running(config, state, instance)
+        ]
+        return {
+            "mod": name,
+            "list_name": body.list_name,
+            "instances": body.instances,
+            "applies_at_next_start": running,
+        }
 
     @app.delete("/api/config/mods/{name}", dependencies=writes)
     def remove_configured_mod(name: str, force: bool = False) -> dict[str, Any]:

@@ -511,6 +511,23 @@ the same mod twice and let two instances pin it inconsistently.
 
 Adding does not download. That is `mods update`, which is a job.
 
+### Assigning a configured mod to servers
+
+Adding a mod offers instances at the time, but a mod already in the config needs a way to
+reach another server. `PATCH /api/config/mods/{name}/instances` sets which instances carry
+it, in which of the three lists.
+
+Ticked instances gain it; unticked ones lose it **from that list only**, so unloading a mod
+does not silently discard a `keep_mods` claim on it.
+
+Assigning to one list clears the other two for that instance, because the three are
+mutually exclusive — config validation rejects a mod that is both loaded and kept, or both
+client and server-only. Doing that here means a tick in the UI cannot produce a config that
+will not load.
+
+The panel preselects whichever list the mod is already in, so opening it and saving without
+touching anything is a no-op rather than a silent move to `mods`.
+
 ### Mods already on disk
 
 Not everything comes from the Workshop through dzsm: there are mods from an existing

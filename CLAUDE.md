@@ -276,6 +276,16 @@ or intercepted anyway — do not try to embed it. Search needs a Web API key
 `GetPublishedFileDetails`. Keep both paths: the keyless one is what makes the browser
 usable without an API key at all.
 
+**Assigning a configured mod to servers** goes through `settings.set_mod_instances`.
+Ticked instances gain it, unticked lose it **from that list only** — unloading must not
+discard a `keep_mods` claim. Assigning to one list clears the other two for that instance,
+since the three are mutually exclusive and config validation rejects the overlap; without
+that, a tick in the UI produces a config that will not load.
+
+Note `AssignMod.list_name`, not `list`: a pydantic field called `list` shadows the builtin
+inside the class body, so the sibling `list[str]` annotation resolves against the field's
+default and the module fails to import.
+
 **Mods already on disk** are added as `kind = "local"` and referenced where they are —
 never copied. `GET /api/localmods` scans a folder of mods *or* a single mod folder;
 `addons/` is the marker, `@` only a hint. That scan is **token-gated despite being a

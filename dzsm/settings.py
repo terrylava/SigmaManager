@@ -261,6 +261,66 @@ def add_mod_to_instance(
     return document
 
 
+MOD_LISTS = ("mods", "server_mods", "keep_mods")
+
+
+def set_mod_instances(
+    document: TOMLDocument,
+    mod_name: str,
+    list_name: str,
+    instance_names: Collection[str],
+) -> TOMLDocument:
+    """Set which instances carry a mod in one of their three lists.
+
+    Ticked instances get it appended to `list_name`; unticked ones lose it from that list
+    only, so unloading a mod does not silently discard a `keep_mods` claim on it.
+
+    Adding to one list removes it from the other two for that instance, because the three
+    are mutually exclusive: config validation rejects a mod that is both loaded and kept,
+    or both client and server-only. Doing it here means a tick cannot produce a config
+    that will not load.
+    """
+    if list_name not in MOD_LISTS:
+        raise SettingsError(f"unknown list {list_name!r}; expected one of {', '.join(MOD_LISTS)}")
+
+    mods = document.get("mods")
+    if mods is None or mod_name not in mods:
+        raise SettingsError(f"no mod named {mod_name!r} in the config")
+
+    instances = document.get("instances") or {}
+    unknown = sorted(set(instance_names) - set(instances))
+    if unknown:
+        raise SettingsError(f"unknown instance(s): {', '.join(unknown)}")
+
+    wanted = set(instance_names)
+    for instance_name, table in instances.items():
+        if instance_name in wanted:
+            for other in MOD_LISTS:
+                if other != list_name:
+                    _drop(table, other, mod_name)
+            _ensure(table, list_name, mod_name)
+        else:
+            _drop(table, list_name, mod_name)
+    return document
+
+
+def _ensure(table: Any, list_name: str, mod_name: str) -> None:
+    array = table.get(list_name)
+    if array is None:
+        array = tomlkit.array()
+        table[list_name] = array
+    if mod_name not in list(array):
+        array.append(mod_name)
+
+
+def _drop(table: Any, list_name: str, mod_name: str) -> None:
+    array = table.get(list_name)
+    if array is None:
+        return
+    while mod_name in list(array):
+        array.remove(mod_name)
+
+
 def instances_using(document: TOMLDocument, mod_name: str) -> list[str]:
     """Instances that reference a mod anywhere — loaded, server-only, or merely kept."""
     using = []
