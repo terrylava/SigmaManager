@@ -88,6 +88,37 @@ def test_short_root_is_accepted() -> None:
     assert cfg.root == Path(r"D:\dz")
 
 
+def test_the_api_key_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Steam Web API key is tied to the account, and config files get copied between
+    machines and pasted into support threads."""
+    steam = _steam()
+    monkeypatch.delenv(steam.api_key_env, raising=False)
+    assert steam.api_key() is None
+
+    monkeypatch.setenv(steam.api_key_env, "ABC123")
+    assert steam.api_key() == "ABC123"
+
+
+def test_an_empty_api_key_reads_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    steam = _steam()
+    monkeypatch.setenv(steam.api_key_env, "")
+
+    assert steam.api_key() is None
+
+
+def test_the_api_key_variable_can_be_renamed(monkeypatch: pytest.MonkeyPatch) -> None:
+    steam = SteamConfig(
+        username="someone",
+        steamcmd_path=Path(r"D:\dz\steamcmd\steamcmd.exe"),
+        api_key_env="MY_OWN_KEY",
+    )
+    monkeypatch.setenv("MY_OWN_KEY", "XYZ")
+
+    assert steam.api_key() == "XYZ"
+
+
 def test_password_comes_from_the_environment_not_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

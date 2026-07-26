@@ -71,9 +71,19 @@ class SteamConfig(BaseModel):
     # fails with instructions instead.
     auto_install: bool = True
 
+    # Name of the env var holding a Steam Web API key, for the endpoints that need one
+    # (searching the Workshop, rather than looking up ids you already have). Like every
+    # other credential here it is never in config: an API key is tied to your account,
+    # and config files get copied between machines and pasted into support threads.
+    api_key_env: str = "DZSM_STEAM_API_KEY"
+
     def password(self) -> str | None:
         """Read the password from the environment. None if unset."""
         return os.environ.get(self.password_env)
+
+    def api_key(self) -> str | None:
+        """Steam Web API key from the environment. None if unset."""
+        return os.environ.get(self.api_key_env) or None
 
 
 class ApiConfig(BaseModel):

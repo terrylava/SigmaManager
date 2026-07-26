@@ -64,6 +64,10 @@ username = "your_steam_account"
 # The password is read from this environment variable, never from this file.
 # Seed Steam Guard once interactively; steamcmd caches a sentry afterward.
 password_env = "DZSM_STEAM_PASSWORD"
+# Env var holding a Steam Web API key (from steamcommunity.com/dev/apikey). Only needed
+# for searching the Workshop; checking and downloading mods you already know the id of
+# does not use one. Never put the key itself in this file.
+api_key_env = "DZSM_STEAM_API_KEY"
 # steamcmd is downloaded from Valve automatically if it isn't here already.
 steamcmd_path = 'D:\dz\steamcmd\steamcmd.exe'
 # Set false to refuse to fetch an executable at runtime; dzsm then fails with
