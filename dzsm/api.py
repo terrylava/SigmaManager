@@ -7,14 +7,21 @@ call into the same functions the CLI uses, so the two can never disagree about w
 
 Access model:
 
-- Read routes are open. They disclose mod names, versions, ports, and paths — nothing
-  secret; the Steam password and API token live in environment variables and are never
-  returned.
 - Write routes (start, stop, update, delete) require the token from `api.token_env` when
   one is set.
+- So do reads that return the contents of a file or the configuration: serverDZ.cfg
+  carries `passwordAdmin`, and config.toml carries the whole layout of the machine.
+  Leaving those open meant that on a token-protected, network-bound deployment — the only
+  deployment the token exists for — writes were refused while the admin password was
+  handed to anyone who could reach the port.
+- Other reads are open. They disclose mod names, versions, ports and job status; the
+  Steam password and the API token live in environment variables and are never returned.
 - When no token is set, writes are still permitted, because `dzsm serve` refuses to bind
   anything but a loopback address in that case — local access is already equivalent to
   having the CLI.
+- Unsafe methods reject a cross-origin browser request whatever the token says: with no
+  token (the loopback default) every no-body POST is a "simple request", so any page in
+  the operator's browser could stop their servers with a plain form.
 
 Long operations (mod and server downloads) return 202 with a job id rather than holding a
 connection open for twenty minutes.
@@ -32,10 +39,11 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import psutil
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from dzsm import runner, settings
@@ -75,6 +83,11 @@ TOKEN_HEADER = "X-DZSM-Token"  # noqa: S105 — a header name, not a secret
 # pages; 50 is deep enough that nobody sensibly pages that far for a mod.
 MAX_SEARCH_PER_PAGE = 50
 MAX_SEARCH_PAGES = 50
+
+# Methods that do not change anything, and so are not worth refusing cross-origin: the
+# response is unreadable to the calling page anyway, and refusing them would break
+# ordinary linking.
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 class AddMod(BaseModel):
@@ -299,6 +312,41 @@ def create_app(config_path: Path) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def block_cross_origin(request: Request, call_next: Any) -> Any:
+        """Refuse state-changing requests that a browser made from another site.
+
+        Without this, `POST /api/instances/x/stop` is a CORS "simple request": it carries
+        no body and no custom header, so any page the operator visits can fire it with a
+        plain <form> and no preflight. The response is unreadable cross-origin, but the
+        server still stops — and stopping also sets `held`, so the supervisor will not
+        bring it back. On the loopback-without-token default that is a drive-by outage.
+
+        Only browsers send these headers, so curl and the CLI are unaffected. That is the
+        intended trade: this closes the browser-driven hole without turning the API into
+        something only a browser can call.
+        """
+        if request.method not in SAFE_METHODS:
+            origin = request.headers.get("origin")
+            site = request.headers.get("sec-fetch-site")
+            host = request.headers.get("host", "")
+            # "none" is a user typing the URL; "same-origin" is the dashboard itself.
+            cross = (origin is not None and urlparse(origin).netloc != host) or (
+                site is not None and site not in {"same-origin", "none"}
+            )
+            if cross:
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={
+                        "detail": (
+                            f"cross-origin {request.method} refused (origin {origin!r}). "
+                            f"This endpoint changes state and is only callable from the "
+                            f"dashboard itself or from a non-browser client."
+                        )
+                    },
+                )
+        return await call_next(request)
 
     def current_state() -> State:
         return load_state(config.state_file)
@@ -914,7 +962,7 @@ def create_app(config_path: Path) -> FastAPI:
 
     # --- settings ------------------------------------------------------------
 
-    @app.get("/api/config")
+    @app.get("/api/config", dependencies=writes)
     def get_config() -> dict[str, Any]:
         """The config file as text, for editing directly."""
         return {
@@ -934,7 +982,7 @@ def create_app(config_path: Path) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"saved": True, "instances": sorted(config.instances)}
 
-    @app.get("/api/config/global")
+    @app.get("/api/config/global", dependencies=writes)
     def get_global_settings() -> dict[str, Any]:
         """Manager-wide settings and their current values, by dotted path."""
         return {
@@ -978,9 +1026,13 @@ def create_app(config_path: Path) -> FastAPI:
             "applies_at_next_start": runner.is_running(config, state, name),
         }
 
-    @app.get("/api/instances/{name}/serverdz")
+    @app.get("/api/instances/{name}/serverdz", dependencies=writes)
     def get_serverdz(name: str) -> dict[str, Any]:
-        """The instance's serverDZ.cfg, as text."""
+        """The instance's serverDZ.cfg, as text.
+
+        Token-gated despite being a read: this file holds `passwordAdmin`, which is the
+        in-game admin password, and the server's join password.
+        """
         _known_instance(config, name)
         path = config.instance_dir(name) / config.instances[name].config_file
         if not path.is_file():

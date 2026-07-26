@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dzsm.config import Config, LocalMod, WorkshopMod
+from dzsm.config import Config, LocalMod, WorkshopMod, is_bare_name
 from dzsm.state import State
 
 _log = logging.getLogger(__name__)
@@ -480,6 +480,16 @@ def local_copy(
     The version is returned rather than recorded in the config: once forked, the copy has
     no relationship to the Workshop item and must not be mistaken for a pin to it.
     """
+    # The name reaches here straight from a request body, and it names a directory that is
+    # about to be written to. `localmods_dir / "../../x"` escapes the root, and an
+    # absolute path replaces it outright — and the failure path below deletes whatever it
+    # produced, so an unchecked name is an arbitrary write *and* an arbitrary delete.
+    if not is_bare_name(target_name):
+        raise ModCacheError(
+            f"{target_name!r} is not a usable name for a local copy: it must be a plain "
+            f"folder name, with no path separators or '..'"
+        )
+
     mod = config.mods.get(mod_name)
     if mod is None:
         raise ModCacheError(f"no mod named {mod_name!r}")
@@ -500,6 +510,10 @@ def local_copy(
         raise ModCacheError(f"{mod_name!r} source files are missing: {source}")
 
     destination = config.localmods_dir / target_name
+    # Second layer, deliberately: the name check above is a denylist of characters, and
+    # this is the property that actually matters. If they ever disagree, this one decides.
+    if destination.resolve().parent != config.localmods_dir.resolve():
+        raise ModCacheError(f"refusing to write outside {config.localmods_dir}: {destination}")
     if destination.exists():
         raise ModCacheError(f"{destination} already exists; pick another name")
 

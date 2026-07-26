@@ -715,10 +715,25 @@ def _raise_for_output(output: str, *, context: str) -> None:
             raise SteamError(f"{context} failed: steamcmd reported {marker!r}\n{_tail(output)}")
 
 
+# steamcmd flags whose *next* argument is a secret. Redacting by position as well as by
+# value catches secrets this function was never handed: -betapassword is built in
+# update_server_app from its own env var, so matching against the account password alone
+# left the branch password in the debug log verbatim.
+SECRET_FLAGS = frozenset({"-betapassword"})
+
+
 def _redact(argv: list[str], password: str | None) -> str:
-    if not password:
-        return " ".join(argv)
-    return " ".join("***" if arg == password else arg for arg in argv)
+    """Render a steamcmd command line with credentials removed."""
+    out: list[str] = []
+    secret_next = False
+    for arg in argv:
+        if secret_next:
+            out.append("***")
+            secret_next = False
+            continue
+        secret_next = arg in SECRET_FLAGS
+        out.append("***" if password and arg == password else arg)
+    return " ".join(out)
 
 
 def _mtime(path: Path) -> float | None:

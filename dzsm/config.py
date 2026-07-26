@@ -7,6 +7,7 @@ downstream code has to re-check whether a mod name resolves or whether a path is
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -27,6 +28,21 @@ MAX_ROOT_PATH_LEN = 40
 # BattlEye's RCON port sits three above the game port in a stock DayZ layout: a server on
 # 2302 listens for RCON on 2305.
 RCON_PORT_OFFSET = 3
+
+
+# Characters that make a string more than a bare name: path separators (both, since a
+# config written on Windows is read on Linux and vice versa), a drive-letter colon, and
+# control characters. Used to keep settings that get joined onto a managed directory from
+# escaping it.
+_PATHISH = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def is_bare_name(value: str) -> bool:
+    """True if `value` is a single file or directory name, safe to join onto a directory.
+
+    The check the path-traversal guards share: no separators, no drive letter, not '..'.
+    """
+    return bool(value) and value not in {".", ".."} and not _PATHISH.search(value)
 
 
 class ConfigError(Exception):
@@ -167,6 +183,30 @@ class InstanceConfig(BaseModel):
     rcon_enabled: bool = True
     # Env var holding this instance's RCON password, when it differs from the global one.
     rcon_password_env: str | None = None
+
+    @field_validator("server_executable", "config_file", "mission", "mission_source")
+    @classmethod
+    def _must_be_a_bare_filename(cls, v: str | None) -> str | None:
+        """Reject anything that is not a single name inside its own directory.
+
+        Every one of these is joined onto a directory dzsm owns — the server directory,
+        the instance directory, mpmissions/. A path separator escapes that directory, and
+        an *absolute* path escapes it completely: pathlib's `base / "C:/x"` discards base
+        entirely and returns C:/x. For server_executable that turns an edit of a settings
+        field into "launch any binary on the machine"; for config_file it turns saving
+        serverDZ.cfg into an arbitrary file write.
+
+        Validated here rather than at the API so a hand-edited config is covered too.
+        """
+        if v is None:
+            return v
+        if not is_bare_name(v):
+            raise ValueError(
+                f"must be a plain file or directory name with no path separators, drive "
+                f"letter, or '..', got {v!r}. These are looked up inside a directory dzsm "
+                f"manages; a path would escape it."
+            )
+        return v
 
     def resolved_rcon_port(self) -> int | None:
         """The RCON port to talk to, or None when RCON is off for this instance."""

@@ -103,6 +103,7 @@ const attr = (name, value) => ' ' + name + '="' + esc(value) + '"';
 
 let busy = false;
 let jobs = [];
+let unauthorized = false;   // a gated read came back 401: the token is missing or wrong
 let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null,
             updates: null};
 
@@ -284,7 +285,8 @@ const actions = {
   editCfg: async d => {
     if (cfgEditing === d.name) { cfgEditing = null; painted = ''; render(); return; }
     try {
-      const r = await fetch('api/instances/' + encodeURIComponent(d.name) + '/serverdz');
+      const r = await fetch('api/instances/' + encodeURIComponent(d.name) + '/serverdz',
+                            {headers: headers()});
       const out = await r.json();
       if (!r.ok) { say(out.detail || 'could not read serverDZ.cfg', true); return; }
       cfgEditing = d.name; painted = ''; render();
@@ -1039,19 +1041,37 @@ const FOOTERS = {
       + 'activated at each server\'s next start.',
 };
 
+function tokenPrompt(view) {
+  if (!unauthorized) return '';
+  // The box is on the overview, so from anywhere else this has to say where to go.
+  return '<div class="panel"><h3 class="err">This server needs an API token</h3>'
+    + '<p class="note">Some of what this page shows is refused without it &mdash; '
+    + 'serverDZ.cfg and the manager settings carry passwords and the machine\'s layout. '
+    + (view.page === 'overview'
+       ? 'Paste it into the box below.'
+       : 'Enter it on the <a href="#/">Overview</a>.')
+    + ' It is the value of the environment variable named by <code>api.token_env</code>.'
+    + '</p></div>';
+}
+
 function render() {
   const view = route();
   document.getElementById('nav').innerHTML = navBar(view);
-  document.getElementById('c').innerHTML =
+  document.getElementById('c').innerHTML = tokenPrompt(view) + (
       view.page === 'server' ? renderServer(view.name)
     : view.page === 'mods' ? renderMods()
-    : renderOverview();
+    : renderOverview());
   document.getElementById('foot').innerHTML = FOOTERS[view.page];
 
   const box = document.getElementById('token');
   if (box) {
     box.value = token();
-    box.addEventListener('change', e => sessionStorage.setItem('dzsm-token', e.target.value));
+    box.addEventListener('change', e => {
+      sessionStorage.setItem('dzsm-token', e.target.value);
+      // Reload straight away rather than waiting out the poll: someone who has just
+      // pasted a token wants to see it take effect.
+      painted = ''; load();
+    });
   }
   const qbox = document.getElementById('q');
   if (qbox) qbox.value = pendingQuery;
@@ -1065,20 +1085,27 @@ let painted = '';
 
 async function load() {
   try {
+    // Every read goes out with the token, not just the ones that need it today: which
+    // reads are gated is a server-side decision, and a page that only authenticates the
+    // requests it thinks are protected breaks silently the moment that changes.
+    //
+    // A 401 yields null rather than throwing, so one gated route being refused leaves the
+    // rest of the page working instead of replacing all of it with an error.
+    let refused = false;
+    const get = async path => {
+      const r = await fetch(path, {headers: headers()});
+      if (r.status === 401) { refused = true; return null; }
+      return r.json();
+    };
     const [inst, vers, srv, health, jl, mods, glob, upd] = await Promise.all([
-      fetch('api/instances').then(r => r.json()),
-      fetch('api/versions').then(r => r.json()),
-      fetch('api/server').then(r => r.json()),
-      fetch('api/health').then(r => r.json()),
-      fetch('api/jobs').then(r => r.json()),
-      fetch('api/mods').then(r => r.json()),
-      fetch('api/config/global').then(r => r.json()),
-      fetch('api/updates').then(r => r.json()),
+      get('api/instances'), get('api/versions'), get('api/server'), get('api/health'),
+      get('api/jobs'), get('api/mods'), get('api/config/global'), get('api/updates'),
     ]);
-    last = {instances: inst, versions: vers, server: srv, mods: mods, global: glob,
-            updates: upd};
-    jobs = jl;
-    document.getElementById('root').textContent = health.root;
+    unauthorized = refused;
+    last = {instances: inst || [], versions: vers || [], server: srv || {builds: []},
+            mods: mods || [], global: glob, updates: upd};
+    jobs = jl || [];
+    document.getElementById('root').textContent = health ? health.root : '';
 
     // Only repaint when something actually changed. Rebuilding the DOM on a timer wipes
     // whatever is being typed and can swallow a click that lands mid-refresh.
@@ -1090,7 +1117,7 @@ async function load() {
     // itself only changes when a check runs, so without this "5 min ago" would still say
     // that half an hour later.
     const snapshot = JSON.stringify(
-      [last, jobs, busy, location.hash, cfgEditing, assigning,
+      [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized,
        ago(last.updates && last.updates.last_checked)],
       (k, v) => (k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v));
     if (snapshot === painted) return;
