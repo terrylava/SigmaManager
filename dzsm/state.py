@@ -73,6 +73,25 @@ class State(BaseModel):
     # records the answer: without this there is no way to tell "nothing has changed" from
     # "nothing has been checked", and those need very different responses.
     last_checked_at: datetime | None = None
+    # Whether steamcmd could last authenticate from its cached sentry. None means nothing
+    # has exercised it yet — which is not the same as broken, and must not be shown as if
+    # it were. The sentry expires without warning, and the failure otherwise surfaces as a
+    # download dying at whatever moment happens to need one.
+    steam_session_ok: bool | None = None
+    steam_session_checked_at: datetime | None = None
+    # Why it failed, for showing without making anyone read the log.
+    steam_session_detail: str | None = None
+
+    def record_steam_session(self, *, ok: bool, detail: str | None = None) -> None:
+        """Record what an operation that used steamcmd's credentials just proved.
+
+        Called from downloads as well as the explicit check: a successful mod download is
+        proof the session works, and there is no reason to make someone press a button to
+        learn what dzsm already knows.
+        """
+        self.steam_session_ok = ok
+        self.steam_session_checked_at = datetime.now(UTC)
+        self.steam_session_detail = detail
 
     def record_version(self, workshop_id: int, version: int, size_bytes: int = 0) -> None:
         """Register a promoted snapshot."""

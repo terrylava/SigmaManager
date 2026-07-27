@@ -65,6 +65,8 @@ from dzsm.mods import (
 from dzsm.state import State, load_state, save_state
 from dzsm.steam import (
     SteamError,
+    SteamGuardRequired,
+    SteamLoginFailed,
     WorkshopItem,
     check_updates,
     download_mod,
@@ -73,6 +75,7 @@ from dzsm.steam import (
     update_server_app,
     verify_download,
 )
+from dzsm.steam import login as steam_login
 
 _log = logging.getLogger(__name__)
 
@@ -440,6 +443,41 @@ def create_app(config_path: Path) -> FastAPI:
                 entry["update_available"] = False
             result.append(entry)
         return result
+
+    @app.get("/api/steam", dependencies=writes)
+    def steam_status() -> dict[str, Any]:
+        """Whether steamcmd can still authenticate, and what to do when it cannot.
+
+        Token-gated: it names the Steam account and the steamcmd location, which is the
+        same class of thing as the config file.
+
+        dzsm never handles the password — `dzsm login --interactive` hands steamcmd the
+        terminal so the password and Guard code go straight into it. So this reports and
+        instructs; it cannot log in.
+        """
+        state = current_state()
+        return {
+            "username": config.steam.username,
+            "ok": state.steam_session_ok,
+            "checked_at": (
+                state.steam_session_checked_at.isoformat()
+                if state.steam_session_checked_at
+                else None
+            ),
+            "detail": state.steam_session_detail,
+            "steamcmd_installed": config.steam.steamcmd_path.is_file(),
+            # The exact command, with this daemon's config path already in it, so a stale
+            # session does not turn into a hunt through the docs.
+            "login_command": f'dzsm login --interactive --config "{config_path}"',
+            "password_env_set": config.steam.password() is not None,
+        }
+
+    @app.post("/api/steam/verify", status_code=202, dependencies=writes)
+    def verify_steam(background: BackgroundTasks) -> Job:
+        """Prove the cached session still works. A job: steamcmd can take a while."""
+        job = jobs.create("steam.verify")
+        background.add_task(_run_steam_verify, config, jobs, job.id)
+        return job
 
     @app.get("/api/updates")
     def update_status() -> dict[str, Any]:
@@ -1120,6 +1158,37 @@ def _known_instance(config: Config, name: str) -> None:
         raise HTTPException(status_code=404, detail=f"no such instance {name!r}")
 
 
+def _run_steam_verify(config: Config, jobs: JobRegistry, job_id: str) -> None:
+    """Body of the steam.verify job. A non-interactive login proves the sentry is good."""
+    state = load_state(config.state_file)
+    try:
+        steam_login(config.steam)
+    except SteamError as exc:
+        state.record_steam_session(ok=False, detail=str(exc).split("\n")[0])
+        save_state(config.state_file, state)
+        jobs.finish(job_id, ok=False, detail=str(exc))
+        return
+
+    state.record_steam_session(ok=True)
+    save_state(config.state_file, state)
+    jobs.finish(job_id, ok=True, detail=f"signed in as {config.steam.username}")
+
+
+def _note_steam_session(config: Config, state: State, exc: Exception | None) -> None:
+    """Record what a steamcmd operation revealed about the cached session.
+
+    Only credential failures count. A download can fail for a dozen reasons that say
+    nothing about the account — a mod pulled from the Workshop, a full disk — and
+    reporting those as "log in again" would send people to fix the one thing that is not
+    wrong. Both a Guard prompt and a refused sign-in do mean exactly that, though, and
+    missing the second was the likelier of the two to happen in practice.
+    """
+    if exc is None:
+        state.record_steam_session(ok=True)
+    elif isinstance(exc, SteamGuardRequired | SteamLoginFailed):
+        state.record_steam_session(ok=False, detail=str(exc).split("\n")[0])
+
+
 def _run_mod_update(config: Config, jobs: JobRegistry, job_id: str) -> None:
     """Body of the mods.update job. Mirrors `dzsm mods update` exactly."""
     state = load_state(config.state_file)
@@ -1150,11 +1219,15 @@ def _run_mod_update(config: Config, jobs: JobRegistry, job_id: str) -> None:
             promote_snapshot(config, state, mod.workshop_id, latest)
             state.last_seen_remote[mod.workshop_id] = latest
             lines.append(f"{name}: promoted {latest}")
+            # A completed download is proof the cached session works, so the dashboard
+            # never has to ask for a check it already has the answer to.
+            _note_steam_session(config, state, None)
         except (SteamError, ModCacheError) as exc:
             # One broken mod must not stop the batch (Rule 3).
             _log.error("api: mod %s (%s) failed: %s", name, mod.workshop_id, exc)
             lines.append(f"{name}: FAILED {exc}")
             failures += 1
+            _note_steam_session(config, state, exc)
         finally:
             save_state(config.state_file, state)
 
@@ -1166,6 +1239,9 @@ def _run_server_update(config: Config, jobs: JobRegistry, job_id: str, validate:
     try:
         build_id = update_server_app(config, validate=validate)
     except SteamError as exc:
+        state = load_state(config.state_file)
+        _note_steam_session(config, state, exc)
+        save_state(config.state_file, state)
         jobs.finish(job_id, ok=False, detail=str(exc))
         return
 
@@ -1181,6 +1257,7 @@ def _run_server_update(config: Config, jobs: JobRegistry, job_id: str, validate:
 
     state = load_state(config.state_file)
     state.serverapp_version = build_id
+    _note_steam_session(config, state, None)
     save_state(config.state_file, state)
     jobs.finish(job_id, ok=True, detail=f"server app at build {build_id}")
 

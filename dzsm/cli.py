@@ -238,6 +238,7 @@ def login(
     closed, so a Guard prompt fails fast instead of hanging forever.
     """
     cfg = _load_config(config_path)
+    state = _load_state(cfg)
     try:
         if interactive:
             typer.echo(f"Starting steamcmd for {cfg.steam.username}.")
@@ -246,12 +247,20 @@ def login(
         else:
             steam_login(cfg.steam)
     except SteamGuardRequired as exc:
+        # Recorded so the dashboard says the session is stale rather than waiting for a
+        # download to discover it at an inconvenient moment.
+        state.record_steam_session(ok=False, detail=str(exc).split("\n")[0])
+        save_state(cfg.state_file, state)
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         typer.secho("Or run: dzsm login --interactive", fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(1) from exc
     except SteamError as exc:
         _fail(exc)
 
+    # And recorded on success, so fixing it from a terminal clears the warning in the
+    # browser instead of leaving two views of the same thing disagreeing.
+    state.record_steam_session(ok=True)
+    save_state(cfg.state_file, state)
     typer.secho(f"logged in as {cfg.steam.username}", fg=typer.colors.GREEN)
 
 

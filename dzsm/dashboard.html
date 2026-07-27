@@ -105,7 +105,7 @@ let busy = false;
 let jobs = [];
 let unauthorized = false;   // a gated read came back 401: the token is missing or wrong
 let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null,
-            updates: null};
+            updates: null, steam: null};
 
 function token() { return sessionStorage.getItem('dzsm-token') || ''; }
 function headers() { const t = token(); return t ? {'X-DZSM-Token': t} : {}; }
@@ -241,6 +241,7 @@ const actions = {
   modsCheck: () => post('api/mods/check', 'Check for mod updates'),
   modsUpdate: () => post('api/mods/update', 'Mod update'),
   serverUpdate: () => post('api/server/update', 'Server app update'),
+  verifySteam: () => post('api/steam/verify', 'Steam session check'),
 
   // --- manager settings (overview) ---
 
@@ -442,6 +443,57 @@ function globalField(f, values) {
     + (f.note ? '<span class="note">' + esc(f.note) + '</span>' : '') + '</div>';
 }
 
+function steamPanel() {
+  const s = last.steam;
+  if (!s) return '';
+  const d = busy ? ' disabled' : '';
+
+  // Three states, not two. "Never verified" is not "broken" — a fresh install has done
+  // nothing to exercise the session yet, and shouting at someone about a login that is
+  // probably fine trains them to ignore the panel.
+  let status;
+  if (s.ok === true) {
+    status = '<span class="run">signed in</span> <span class="note">verified '
+           + esc(ago(s.checked_at)) + '</span>';
+  } else if (s.ok === false) {
+    // Deliberately not "needs a Steam Guard code": a refused sign-in and a Guard prompt
+    // both land here, and naming the wrong one sends people looking for a code that was
+    // never asked for. The detail line below says which it actually was.
+    status = '<span class="err">cannot sign in</span> <span class="note">checked '
+           + esc(ago(s.checked_at)) + '</span>';
+  } else {
+    status = '<span class="note">not verified yet</span>';
+  }
+
+  let h = '<h2>Steam</h2><div class="panel">'
+    + '<div class="field"><label>Account</label><code>' + esc(s.username) + '</code></div>'
+    + '<div class="field"><label>Session</label>' + status + '</div>';
+
+  if (!s.steamcmd_installed) {
+    h += '<div class="field"><label>&nbsp;</label><span class="warn">steamcmd is not '
+       + 'installed yet &mdash; it downloads itself on the first Steam operation</span></div>';
+  }
+
+  if (s.ok === false) {
+    h += '<div class="field"><label>&nbsp;</label><span class="note">'
+       + esc(s.detail || 'steamcmd could not authenticate') + '</span></div>'
+       + '<div class="field"><label>Fix it</label><code>' + esc(s.login_command) + '</code></div>'
+       + '<div class="field"><label>&nbsp;</label><span class="note">Run that in a '
+       + 'terminal. It has to be a terminal: your password and Guard code go straight '
+       + 'into steamcmd, and dzsm never sees them &mdash; which is why there is no login '
+       + 'box here. Downloads will fail until it is done.</span></div>';
+  }
+
+  h += '<div class="field"><label>&nbsp;</label>'
+    + '<button data-act="verifySteam"' + d + '>Verify now</button>'
+    + '<span class="note">'
+    + (s.password_env_set
+       ? 'a password is set in the environment; steamcmd uses it'
+       : 'no password stored &mdash; steamcmd signs in from its own cached sentry')
+    + '</span></div>';
+  return h + '</div>';
+}
+
 function managerPanel() {
   if (!last.global) return '';
   return '<h2>Manager settings</h2><div class="panel" data-form>'
@@ -492,7 +544,7 @@ function renderOverview() {
   if (!last.instances.length) h += '<tr><td colspan="6">none configured</tr>';
   h += '</table>';
 
-  h += managerPanel();
+  h += steamPanel() + managerPanel();
 
   h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
@@ -1097,13 +1149,14 @@ async function load() {
       if (r.status === 401) { refused = true; return null; }
       return r.json();
     };
-    const [inst, vers, srv, health, jl, mods, glob, upd] = await Promise.all([
+    const [inst, vers, srv, health, jl, mods, glob, upd, steam] = await Promise.all([
       get('api/instances'), get('api/versions'), get('api/server'), get('api/health'),
       get('api/jobs'), get('api/mods'), get('api/config/global'), get('api/updates'),
+      get('api/steam'),
     ]);
     unauthorized = refused;
     last = {instances: inst || [], versions: vers || [], server: srv || {builds: []},
-            mods: mods || [], global: glob, updates: upd};
+            mods: mods || [], global: glob, updates: upd, steam: steam};
     jobs = jl || [];
     document.getElementById('root').textContent = health ? health.root : '';
 
@@ -1118,7 +1171,8 @@ async function load() {
     // that half an hour later.
     const snapshot = JSON.stringify(
       [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized,
-       ago(last.updates && last.updates.last_checked)],
+       ago(last.updates && last.updates.last_checked),
+       ago(last.steam && last.steam.checked_at)],
       (k, v) => (k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v));
     if (snapshot === painted) return;
     // Never repaint over unsaved edits, an open assignment panel, or a search box being

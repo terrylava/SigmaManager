@@ -46,9 +46,21 @@ STEAMCMD_ERROR_MARKERS = (
     "ERROR! Failed to install app",
     "Disk write failure",
     "No subscription",
+)
+
+# Failures that specifically mean "these credentials will not sign in" — as opposed to the
+# markers above, which are about the work rather than the account. Split out so a download
+# dying can tell the difference between a transient Workshop problem and a session that
+# needs re-seeding: only the latter is worth sending someone to a terminal over.
+#
+# "Cached credentials not found" is the one that actually happens: change the configured
+# account and steamcmd has no sentry for the new name, so it prompts for a password,
+# reads EOF because stdin is closed, and reports an invalid one.
+STEAM_CREDENTIAL_MARKERS = (
     "Invalid Password",
     "FAILED login",
     "Login Failure",
+    "Cached credentials not found",
 )
 
 # Substrings that mean steamcmd wanted an interactive code. We run with stdin closed,
@@ -77,6 +89,17 @@ class SteamGuardRequired(SteamError):
 
     Raised instead of hanging on stdin forever. The fix is a one-time interactive login
     to seed the sentry file; the message says so.
+    """
+
+
+class SteamLoginFailed(SteamError):
+    """steamcmd could not sign in with the credentials it has.
+
+    A sibling of SteamGuardRequired rather than the same thing: both mean "re-seed the
+    session in a terminal", but this one is what you get after changing the configured
+    account, where there is no sentry for the new name at all. Distinct from a plain
+    SteamError so a caller can tell a credential problem from a failed download and only
+    send people to a terminal for the former.
     """
 
 
@@ -709,6 +732,14 @@ def _raise_for_output(output: str, *, context: str) -> None:
                 f"    steamcmd +login <username> +quit\n"
                 f"enter the code when prompted, then re-run. Subsequent runs are "
                 f"non-interactive.\n{_tail(output)}"
+            )
+    for marker in STEAM_CREDENTIAL_MARKERS:
+        if marker in output:
+            raise SteamLoginFailed(
+                f"{context} failed: steamcmd reported {marker!r}. The configured account "
+                f"has no usable cached session — most often because the account was "
+                f"changed and steamcmd has no sentry for the new name. Seed it once:\n"
+                f"    dzsm login --interactive\n{_tail(output)}"
             )
     for marker in STEAMCMD_ERROR_MARKERS:
         if marker in output:
