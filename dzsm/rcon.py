@@ -21,8 +21,10 @@ to send at least an empty command periodically.
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import zlib
+from dataclasses import dataclass
 from types import TracebackType
 
 _log = logging.getLogger(__name__)
@@ -40,6 +42,73 @@ KEEPALIVE_SECONDS = 25.0
 
 class RconError(Exception):
     """RCON is unreachable, refused the password, or answered nonsense."""
+
+
+@dataclass(frozen=True)
+class PlayerSlot:
+    """One connected player, as BattlEye's `players` command reports them.
+
+    `guid` is BattlEye's own identifier. It is **not** the id the DayZ admin log records,
+    which is a different hash of a different thing — the two cannot be joined, which is
+    why the live view and the session ledger are kept as separate things rather than
+    pretending to be one dataset keyed by player.
+
+    `ip` is carried so the live view can show it and deliberately never persisted: it is
+    the only personal data in the set and nothing here needs a durable record of it.
+    """
+
+    number: int
+    ip: str
+    port: int
+    ping: int
+    guid: str
+    name: str
+    # BattlEye appends "(OK)" once it has verified the GUID, "(?)" while it has not.
+    verified: bool
+    # Connected but still loading, which BattlEye marks with a "(Lobby)" suffix.
+    lobby: bool
+
+
+# 0   192.168.1.5:2304      31   d41d8cd9...f8427e(OK) SomeName
+_PLAYER_ROW = re.compile(
+    r"^(?P<number>\d+)\s+"
+    r"(?P<ip>[0-9a-fA-F.:]+):(?P<port>\d+)\s+"
+    r"(?P<ping>-?\d+)\s+"
+    r"(?P<guid>[0-9a-f]+)\((?P<status>[^)]*)\)\s+"
+    r"(?P<name>.*)$"
+)
+
+
+def parse_players(text: str) -> list[PlayerSlot]:
+    """Parse the `players` command's table.
+
+    Deliberately line-by-line and tolerant: it skips the header, the dashes and the
+    trailing count rather than depending on their exact wording, because the only thing
+    worth relying on here is the shape of a row. A format change should cost a player
+    row, not raise.
+    """
+    players: list[PlayerSlot] = []
+    for line in text.splitlines():
+        match = _PLAYER_ROW.match(line.strip())
+        if match is None:
+            continue
+        name = match["name"].strip()
+        lobby = name.endswith("(Lobby)")
+        if lobby:
+            name = name[: -len("(Lobby)")].strip()
+        players.append(
+            PlayerSlot(
+                number=int(match["number"]),
+                ip=match["ip"],
+                port=int(match["port"]),
+                ping=int(match["ping"]),
+                guid=match["guid"],
+                name=name,
+                verified=match["status"].upper() == "OK",
+                lobby=lobby,
+            )
+        )
+    return players
 
 
 def build_packet(payload: bytes) -> bytes:
@@ -162,6 +231,14 @@ class RconClient:
     def say(self, message: str) -> None:
         """Broadcast to every player. `say -1` is BattlEye's global admin chat."""
         self.command(f"say -1 {message}")
+
+    def players(self) -> list[PlayerSlot]:
+        """Who is connected right now.
+
+        The only live view that works regardless of `-adminlog`, and the only source of
+        ping. Returns a list — empty for an empty server, never None (Rule 1).
+        """
+        return parse_players(self.command("players"))
 
     def shutdown(self) -> None:
         """Ask the server to stop.

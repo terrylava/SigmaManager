@@ -46,7 +46,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from dzsm import runner, settings
+from dzsm import players, runner, settings
 from dzsm.config import Config, WorkshopMod, load_config
 from dzsm.instance import InstanceError
 from dzsm.mods import (
@@ -62,6 +62,7 @@ from dzsm.mods import (
     unused_mods,
     version_status,
 )
+from dzsm.rcon import RconError
 from dzsm.state import State, load_state, save_state
 from dzsm.steam import (
     SteamError,
@@ -262,6 +263,28 @@ def _auto_check(
         # checked over the Web API, which needs neither.
         if config.check_server_build:
             _check_server_build(config, jobs)
+
+        # Folded into the same housekeeping tick rather than the supervision loop: the
+        # open admin log grows continuously while anyone is connected, and re-parsing it
+        # every 15s to learn nothing would be pure waste.
+        _ingest_sessions(config)
+
+
+def _ingest_sessions(config: Config) -> None:
+    """Fold any new admin-log sessions into the ledger.
+
+    Never fatal, and never per-instance fatal: one unreadable profiles directory must not
+    stop the others being read, and none of it may take the housekeeping thread down
+    (Rule 3).
+    """
+    for name in config.instances:
+        try:
+            written = players.ingest(config, name)
+        except players.PlayerStoreError as exc:
+            _log.error("players: ingest for %s failed: %s", name, exc)
+            continue
+        if written:
+            _log.info("players: recorded %d session(s) for %s", written, name)
 
 
 def _check_server_build(config: Config, jobs: JobRegistry) -> None:
@@ -528,6 +551,120 @@ def create_app(config_path: Path) -> FastAPI:
         job = jobs.create("steam.verify")
         background.add_task(_run_steam_verify, config, jobs, job.id)
         return job
+
+    @app.get("/api/instances/{name}/players", dependencies=writes)
+    def instance_players(name: str) -> dict[str, Any]:
+        """Who is connected right now, from RCON.
+
+        Token-gated: it returns player names and IP addresses. The IP is passed through
+        for the live view and never stored (see players.py) — it is the only personal
+        data here that nothing needs a durable record of.
+
+        A server that is down, still starting, or has RCON off is not an error: each
+        returns an empty list and says which, because "no players" and "cannot ask" are
+        different answers and a dashboard showing 0 for both would be lying.
+        """
+        _known_instance(config, name)
+        state = current_state()
+
+        if not runner.is_running(config, state, name):
+            return {"instance": name, "available": False, "reason": "not running", "players": []}
+
+        grace = runner.rcon_grace_remaining(config, state, name)
+        if grace > 0:
+            return {
+                "instance": name,
+                "available": False,
+                "reason": f"RCON is not expected to answer for another {grace:.0f}s",
+                "players": [],
+            }
+
+        try:
+            client = runner.rcon_client(config, name)
+        except RconError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if client is None:
+            return {"instance": name, "available": False, "reason": "RCON is off", "players": []}
+
+        try:
+            slots = client.players()
+        except RconError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        finally:
+            client.close()
+
+        return {
+            "instance": name,
+            "available": True,
+            "reason": None,
+            "players": [
+                {
+                    "number": slot.number,
+                    "name": slot.name,
+                    "ping": slot.ping,
+                    "guid": slot.guid,
+                    "ip": slot.ip,
+                    "verified": slot.verified,
+                    "lobby": slot.lobby,
+                }
+                for slot in slots
+            ],
+        }
+
+    @app.get("/api/players", dependencies=writes)
+    def player_ledger(instance: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Accumulated time per player, and the latest sessions, from the admin logs.
+
+        Token-gated: this is personal data about third parties, which is a different
+        thing to expose than a mod list.
+        """
+        if instance is not None and instance not in config.instances:
+            raise HTTPException(status_code=404, detail=f"no such instance {instance!r}")
+        try:
+            ranking = players.totals(config, instance=instance, limit=limit)
+            latest = players.recent_sessions(config, instance=instance, limit=limit)
+        except players.PlayerStoreError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        return {
+            "totals": [
+                {
+                    "player_id": entry.player_id,
+                    "name": entry.name,
+                    "sessions": entry.sessions,
+                    "seconds": entry.seconds,
+                    "last_seen": entry.last_seen.isoformat(),
+                }
+                for entry in ranking
+            ],
+            "sessions": [
+                {
+                    "instance": session.instance,
+                    "player_id": session.player_id,
+                    "name": session.name,
+                    "started_at": session.started_at.isoformat(),
+                    "ended_at": session.ended_at.isoformat(),
+                    "seconds": session.seconds,
+                    "closed_by": session.closed_by,
+                }
+                for session in latest
+            ],
+        }
+
+    @app.post("/api/players/ingest", dependencies=writes)
+    def ingest_players() -> dict[str, Any]:
+        """Read any new or grown admin logs into the ledger.
+
+        Inline rather than a job: it is file parsing, not a download, and re-reading every
+        .ADM an instance has takes well under a second.
+        """
+        written = {}
+        for name in config.instances:
+            try:
+                written[name] = players.ingest(config, name)
+            except players.PlayerStoreError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"sessions": written}
 
     @app.get("/api/updates")
     def update_status() -> dict[str, Any]:

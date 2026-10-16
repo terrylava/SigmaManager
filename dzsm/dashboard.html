@@ -104,6 +104,12 @@ const attr = (name, value) => ' ' + name + '="' + esc(value) + '"';
 let busy = false;
 let jobs = [];
 let unauthorized = false;   // a gated read came back 401: the token is missing or wrong
+
+// Live player lists, per instance, and when each was last fetched. Kept out of `last`
+// because they are polled on their own slower schedule.
+let livePlayers = {};
+const livePlayersAt = {};
+const LIVE_PLAYERS_SECONDS = 10;
 let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null,
             updates: null, steam: null};
 
@@ -719,6 +725,37 @@ function instanceModRow(i, name, list, order) {
     + '</tr>';
 }
 
+function playersPanel(i) {
+  const p = livePlayers[i.name];
+  let body;
+  if (p === undefined) {
+    body = '<p class="note">Loading&hellip;</p>';
+  } else if (!p.available) {
+    // "Nobody connected" and "cannot ask" are different answers, and showing 0 for both
+    // would be a lie.
+    body = '<p class="note">' + esc(p.reason || 'unavailable') + '</p>';
+  } else if (!p.players.length) {
+    body = '<p class="note">Nobody connected.</p>';
+  } else {
+    body = '<table><tr><th>#<th>Name<th>Ping<th>Address<th></tr>'
+      + p.players.map(s =>
+          '<tr><td>' + s.number
+          + '<td>' + esc(s.name)
+          + '<td>' + s.ping + ' ms'
+          + '<td><span class="note">' + esc(s.ip) + '</span>'
+          + '<td>' + (s.lobby ? '<span class="warn">loading</span>' : '')
+            + (s.verified ? '' : ' <span class="warn">unverified</span>')
+          + '</tr>').join('')
+      + '</table>';
+  }
+
+  const count = p && p.available ? ' (' + p.players.length + ')' : '';
+  return '<h2>Players' + count + '</h2><div class="panel">' + body
+    + '<p class="note">Live from RCON. Addresses are shown while someone is connected and '
+    + 'never stored &mdash; the session history comes from the admin log instead.</p>'
+    + '</div>';
+}
+
 function instanceModsPanel(i) {
   let h = '<h2>Mods on this server</h2><table>'
     + '<tr><th>Mod<th>Source<th>Loaded as<th></tr>';
@@ -780,6 +817,7 @@ function renderServer(name) {
     + (pins ? ' &middot; running <code>' + esc(pins) + '</code>' : '') + '</p>';
 
   if (cfgEditing === i.name) h += cfgPanel(i.name);
+  h += playersPanel(i);
   h += launchPanel(i);
   h += instanceModsPanel(i);
   return h;
@@ -1222,6 +1260,22 @@ async function load() {
       get('api/jobs'), get('api/mods'), get('api/config/global'), get('api/updates'),
       get('api/steam'),
     ]);
+    // Live players are fetched only for the server page being looked at, and no more
+    // often than LIVE_PLAYERS_SECONDS. Every poll for every instance would mean a UDP
+    // connect and RCON login per instance every four seconds, which is a lot of traffic
+    // to learn a number that barely moves.
+    const view = route();
+    if (view.page === 'server') {
+      const instance = (inst || []).find(x => x.name === view.name);
+      const last_fetch = livePlayersAt[view.name] || 0;
+      if (instance && Date.now() - last_fetch > LIVE_PLAYERS_SECONDS * 1000) {
+        livePlayersAt[view.name] = Date.now();
+        livePlayers[view.name] =
+          (await get('api/instances/' + encodeURIComponent(view.name) + '/players'))
+          || {available: false, reason: 'needs an API token', players: []};
+      }
+    }
+
     unauthorized = refused;
     last = {instances: inst || [], versions: vers || [], server: srv || {builds: []},
             mods: mods || [], global: glob, updates: upd, steam: steam};
@@ -1238,7 +1292,7 @@ async function load() {
     // itself only changes when a check runs, so without this "5 min ago" would still say
     // that half an hour later.
     const snapshot = JSON.stringify(
-      [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized,
+      [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized, livePlayers,
        ago(last.updates && last.updates.last_checked),
        ago(last.steam && last.steam.checked_at),
        // The restart countdown is rendered text, not data: the deadline itself does not

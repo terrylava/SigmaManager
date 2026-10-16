@@ -405,6 +405,12 @@ class Config(BaseModel):
     def state_file(self) -> Path:
         return self.root / "state.json"
 
+    @property
+    def players_db(self) -> Path:
+        """Session ledger. SQLite, not state.json — that file is rewritten whole on every
+        save, which is the wrong shape for a table that grows a row per session forever."""
+        return self.root / "players.db"
+
     def version_dir(self, workshop_id: int, version: int) -> Path:
         """Absolute path of one immutable version snapshot."""
         return self.modcache_dir / str(workshop_id) / str(version)

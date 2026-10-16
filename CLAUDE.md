@@ -269,6 +269,46 @@ the main one, so a Ctrl-C or service stop shuts both down. Three properties it m
   another thread of the same process; without the reload, the supervisor's older copy
   would overwrite those changes at its next save.
 
+**Player data has two sources that must not be merged** (`dzsm/players.py`). RCON
+`players` is the live view — who is on now, their ping, their BattlEye GUID — and works
+regardless of `-adminlog`. The `.ADM` admin log is the durable record, and is enough to
+reconstruct *exact* concurrency at any past moment, which beats polling RCON on a timer
+because polling samples and misses anything shorter than its interval. It also works on
+logs written before dzsm existed, so a long-running server backfills.
+
+They cannot be joined per player: BattlEye's GUID and the admin log's `id=` are different
+hashes of different things, and **neither is a Steam id** — the ADM id is DayZ's own
+base64 hash, stable per player but not reversible. So the live list and the session ledger
+are deliberately separate datasets, not one keyed by player.
+
+Four things about parsing `.ADM` that are easy to get wrong, all tested against a log
+captured from a real server:
+
+- **The session starts at `is connected`, not `is connecting`.** The latter may never
+  complete.
+- **A log that stops without a disconnect must be closed at its last timestamp.** A crash
+  or restart ends the file mid-session, and leaving it open hands that player unbounded
+  hours the moment anything asks for a duration.
+- **Event lines carry a bare time; only the header carries a date.** A log crossing
+  midnight is detectable only by the clock going backwards.
+- **A disconnect with no matching connect is dropped**, not given an invented start.
+
+Ingest re-reads any file whose size changed and upserts on
+`(instance, player_id, started_at)`. That is idempotent without tracking byte offsets —
+offsets are the fragile part of tailing, and re-parsing a few hundred KB costs nothing
+next to getting them wrong. It also means the open log is picked up as it grows, with the
+running session's end time advancing until a real disconnect replaces it. It runs on the
+housekeeping tick, **not** the supervision loop: the open log grows continuously while
+anyone is connected, and re-parsing every 15s to learn nothing is waste.
+
+Storage is **SQLite** (`players.db`), not state.json — that file is rewritten whole on
+every save, which is the wrong shape for a table that grows a row per session forever.
+
+**IP addresses are shown live and never persisted.** RCON returns them, they go to the
+live panel, and nothing writes them to disk. They are the only personal data in the set
+that nothing here needs a durable record of. Both player routes are token-gated: this is
+personal data about third parties, a different thing to expose than a mod list.
+
 **The Workshop browser is our own UI, not Steam's page.** `steamcommunity.com` sends
 frame-ancestors headers so it cannot be framed, and a cross-origin frame could not be read
 or intercepted anyway — do not try to embed it. Search needs a Web API key

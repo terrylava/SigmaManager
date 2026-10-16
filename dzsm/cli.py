@@ -15,7 +15,7 @@ from typing import Annotated, Any, NoReturn, Optional
 
 import typer
 
-from dzsm import runner
+from dzsm import players, runner
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
 from dzsm.mods import (
@@ -1049,6 +1049,84 @@ def instance_say(
     finally:
         client.close()
     typer.secho(f"{name}: sent", fg=typer.colors.GREEN)
+
+
+@instance_app.command("players")
+def instance_players(
+    name: str,
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """List who is connected right now, over RCON."""
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    if name not in cfg.instances:
+        _fail(ValueError(f"unknown instance {name!r}"))
+
+    try:
+        client = runner.rcon_client(cfg, name)
+    except RconError as exc:
+        _fail(_with_startup_hint(cfg, state, name, exc))
+    if client is None:
+        _fail(ValueError(f"instance {name!r} has rcon_enabled = false"))
+
+    try:
+        slots = client.players()
+    except RconError as exc:
+        _fail(_with_startup_hint(cfg, state, name, exc))
+    finally:
+        client.close()
+
+    if not slots:
+        typer.echo(f"{name}: nobody connected")
+        return
+    for slot in slots:
+        flags = []
+        if slot.lobby:
+            flags.append("loading")
+        if not slot.verified:
+            flags.append("unverified")
+        suffix = f"  ({', '.join(flags)})" if flags else ""
+        typer.echo(f"{slot.number:<3} {slot.name:<24} {slot.ping:>4}ms  {slot.guid}{suffix}")
+    typer.echo(f"{len(slots)} connected")
+
+
+@instance_app.command("sessions")
+def instance_sessions(
+    name: Annotated[
+        Optional[str],  # noqa: UP045 — typer resolves Optional more reliably
+        typer.Argument(help="Instance to report on. Omit for every instance."),
+    ] = None,
+    config_path: ConfigPath = Path("config.toml"),
+    limit: Annotated[int, typer.Option("--limit", help="How many rows to show.")] = 20,
+) -> None:
+    """Hours logged per player, from the admin logs.
+
+    Reads any new or grown .ADM files first, so this is also how you backfill a server
+    that has been running longer than dzsm has.
+    """
+    cfg = _load_config(config_path)
+    if name is not None and name not in cfg.instances:
+        _fail(ValueError(f"unknown instance {name!r}"))
+
+    targets = [name] if name else list(cfg.instances)
+    try:
+        for instance_name in targets:
+            players.ingest(cfg, instance_name)
+        ranking = players.totals(cfg, instance=name, limit=limit)
+    except players.PlayerStoreError as exc:
+        _fail(exc)
+
+    if not ranking:
+        typer.echo("no sessions recorded yet (is -adminlog on, and has anyone played?)")
+        return
+
+    typer.echo(f"{'Player':<24} {'Hours':>8} {'Sessions':>9}  Last seen")
+    for entry in ranking:
+        hours = entry.seconds / 3600
+        typer.echo(
+            f"{entry.name:<24} {hours:>8.1f} {entry.sessions:>9}  "
+            f"{entry.last_seen.strftime('%Y-%m-%d %H:%M')}"
+        )
 
 
 @instance_app.command("rcon")
