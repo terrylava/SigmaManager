@@ -23,6 +23,7 @@ session forever.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
@@ -105,6 +106,21 @@ CREATE TABLE IF NOT EXISTS ingested (
     path  TEXT PRIMARY KEY,
     size  INTEGER NOT NULL
 );
+
+-- Messages BattlEye pushed to a held RCON connection. Chat above all: no command returns
+-- chat history, so a line not written here when it arrives is gone permanently. The live
+-- feed is a ring buffer in memory; this is the part that survives a restart.
+CREATE TABLE IF NOT EXISTS events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance  TEXT NOT NULL,
+    at        TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    name      TEXT,
+    channel   TEXT,
+    text      TEXT,
+    raw       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_by_time ON events (instance, id DESC);
 """
 
 
@@ -287,6 +303,92 @@ def ingest(config: Config, instance_name: str) -> int:
                 (key, size),
             )
     return written
+
+
+@dataclass(frozen=True)
+class StoredEvent:
+    """One pushed RCON message, as recorded."""
+
+    id: int
+    instance: str
+    at: datetime
+    kind: str
+    raw: str
+    name: str | None
+    channel: str | None
+    text: str | None
+
+
+def record_event(
+    config: Config,
+    instance: str,
+    *,
+    kind: str,
+    raw: str,
+    name: str | None = None,
+    channel: str | None = None,
+    text: str | None = None,
+) -> None:
+    """Persist one pushed message.
+
+    Takes the fields rather than an rcon.RconEvent so this module does not depend on the
+    protocol layer — the ledger should not care how a message reached it.
+    """
+    with connect(config) as connection:
+        connection.execute(
+            "INSERT INTO events (instance, at, kind, name, channel, text, raw) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                instance,
+                datetime.now().strftime(TIMESTAMP_FORMAT),
+                kind,
+                name,
+                channel,
+                text,
+                raw,
+            ),
+        )
+
+
+def recent_events(
+    config: Config,
+    *,
+    instance: str | None = None,
+    kinds: tuple[str, ...] | None = None,
+    limit: int = 200,
+) -> list[StoredEvent]:
+    """The latest stored messages, newest first.
+
+    `kinds` filters to e.g. just chat. Passed as a JSON array and matched with json_each
+    rather than building an IN clause, so the statement stays static.
+    """
+    query = """
+        SELECT * FROM events
+         WHERE (:instance IS NULL OR instance = :instance)
+           AND (:kinds IS NULL OR kind IN (SELECT value FROM json_each(:kinds)))
+      ORDER BY id DESC
+         LIMIT :limit
+    """
+    arguments = {
+        "instance": instance,
+        "kinds": json.dumps(list(kinds)) if kinds else None,
+        "limit": limit,
+    }
+    with connect(config) as connection:
+        rows = connection.execute(query, arguments).fetchall()
+    return [
+        StoredEvent(
+            id=row["id"],
+            instance=row["instance"],
+            at=datetime.strptime(row["at"], TIMESTAMP_FORMAT),
+            kind=row["kind"],
+            raw=row["raw"],
+            name=row["name"],
+            channel=row["channel"],
+            text=row["text"],
+        )
+        for row in rows
+    ]
 
 
 @dataclass(frozen=True)

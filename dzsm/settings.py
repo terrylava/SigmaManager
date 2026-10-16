@@ -61,6 +61,7 @@ EDITABLE_INSTANCE_FIELDS = frozenset(
         "mission_source",
         "rcon_port",
         "rcon_enabled",
+        "rcon_live",
         "extra_args",
         "config_file",
     }

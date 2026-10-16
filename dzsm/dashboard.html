@@ -73,6 +73,13 @@
  .hit .meta { color: #666; font-size: .8rem }
  .hit .act { flex: none; text-align: right }
  .targets label { display: block; color: #ccc; font-size: .85rem }
+ #feed { max-height: 18rem; overflow-y: auto; background: #0d0d0d; border: 1px solid #262626;
+         border-radius: 4px; padding: .5rem .7rem; font: 12px ui-monospace, Consolas, monospace }
+ #feed .line { padding: .1rem 0; white-space: pre-wrap; word-break: break-word }
+ #feed .chan { color: #666 }
+ #feed .who { color: #93c5fd; font-weight: 600 }
+ #chat { font: inherit; background: #1a1a1a; color: #ddd; border: 1px solid #333;
+         border-radius: 4px; padding: .3rem .5rem }
  .head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; margin-bottom: 1rem }
  .head h2 { margin: 0; font-size: 1.1rem; text-transform: none; letter-spacing: 0; color: #ddd }
 </style>
@@ -110,6 +117,11 @@ let unauthorized = false;   // a gated read came back 401: the token is missing 
 let livePlayers = {};
 const livePlayersAt = {};
 const LIVE_PLAYERS_SECONDS = 10;
+
+// Live chat and event feed, per instance, with the cursor each was last read to.
+let feeds = {};
+const FEED_HISTORY = 50;   // stored lines to load when first opening a server page
+const FEED_LINES = 300;    // how much to keep in the page before trimming
 let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null,
             updates: null, steam: null};
 
@@ -249,6 +261,22 @@ const actions = {
   serverUpdate: () => post('api/server/update', 'Server app update'),
   verifySteam: () => post('api/steam/verify', 'Steam session check'),
 
+  sendChat: async d => {
+    const box = document.getElementById('chat');
+    const message = box.value.trim();
+    if (!message) return;
+    // Cleared optimistically: the message appears in the feed when the server echoes it
+    // back, and leaving the text sitting there invites sending it twice.
+    box.value = '';
+    pendingChat = '';
+    const name = d.name || route().name;
+    if (!await send('POST', 'api/instances/' + encodeURIComponent(name) + '/say',
+                    {message: message}, 'Sent to ' + name)) {
+      pendingChat = message;   // put it back so it is not lost
+      painted = ''; render();
+    }
+  },
+
   // --- manager settings (overview) ---
 
   saveGlobal: async () => {
@@ -284,6 +312,7 @@ const actions = {
       adminlog: checked('f-adminlog'),
       netlog: checked('f-netlog'),
       freezecheck: checked('f-freezecheck'),
+      rcon_live: checked('f-rconlive'),
     };
     await send('PATCH', 'api/instances/' + encodeURIComponent(d.name) + '/settings',
                patch, 'Settings for ' + d.name + ' saved');
@@ -678,6 +707,10 @@ function launchPanel(i) {
       + flag('dologs', i.dologs, '-dologs') + flag('adminlog', i.adminlog, '-adminlog')
       + flag('netlog', i.netlog, '-netlog') + flag('freezecheck', i.freezecheck, '-freezecheck')
       + '</div></div>'
+    + '<div class="field flags"><label>Live RCON</label><div>'
+      + flag('rconlive', i.rcon_live, 'hold a connection open')
+      + '<span class="note">needed for chat and the live feed; takes effect at once, not '
+      + 'at the next start</span></div></div>'
     + '<div class="field"><label>&nbsp;</label>'
       + '<button class="primary" data-act="saveLaunch"' + attr('data-name', i.name)
       + (busy ? ' disabled' : '') + '>Save</button>'
@@ -756,6 +789,48 @@ function playersPanel(i) {
     + '</div>';
 }
 
+function feedLine(e) {
+  if (e.kind === 'chat') {
+    return '<div class="line"><span class="chan">' + esc(e.channel || 'chat') + '</span> '
+      + '<span class="who">' + esc(e.name || '?') + '</span> '
+      + esc(e.text || '') + '</div>';
+  }
+  const cls = e.kind === 'connect' ? 'run' : e.kind === 'disconnect' ? 'stop'
+            : e.kind === 'kick' ? 'err' : 'note';
+  return '<div class="line"><span class="' + cls + '">' + esc(e.raw) + '</span></div>';
+}
+
+function feedPanel(i) {
+  const f = feeds[i.name];
+  const d = busy ? ' disabled' : '';
+
+  let body;
+  if (f === undefined) {
+    body = '<p class="note">Loading&hellip;</p>';
+  } else if (!f.events.length) {
+    body = '<p class="note">'
+      + (f.live ? 'Connected. Nothing said yet.' : esc(f.reason || 'not connected'))
+      + '</p>';
+  } else {
+    body = '<div id="feed">' + f.events.map(feedLine).join('') + '</div>';
+  }
+
+  const state = f && f.live
+    ? '<span class="run">live</span>'
+    : '<span class="note">' + esc((f && f.reason) || 'not connected') + '</span>';
+
+  return '<h2>Chat &amp; events ' + state + '</h2><div class="panel">' + body
+    + '<div class="field" style="margin-top:.8rem">'
+      + '<input type="text" id="chat" data-enter="sendChat" style="flex:1;min-width:16rem"'
+      + ' placeholder="Message every player on this server" maxlength="180">'
+      + '<button class="primary" data-act="sendChat"' + attr('data-name', i.name) + d
+      + '>Send</button>'
+    + '</div>'
+    + '<p class="note">Goes out as admin chat, visible to everyone connected. Chat is kept; '
+    + 'BattlEye has no way to ask for it later, so a line missed while disconnected is '
+    + 'gone.</p></div>';
+}
+
 function instanceModsPanel(i) {
   let h = '<h2>Mods on this server</h2><table>'
     + '<tr><th>Mod<th>Source<th>Loaded as<th></tr>';
@@ -818,6 +893,7 @@ function renderServer(name) {
 
   if (cfgEditing === i.name) h += cfgPanel(i.name);
   h += playersPanel(i);
+  h += feedPanel(i);
   h += launchPanel(i);
   h += instanceModsPanel(i);
   return h;
@@ -919,6 +995,7 @@ let hitsQuery = '';
 let hitsPage = 1;
 let hitsPages = 1;
 let pendingQuery = '';    // survives a repaint, so a background refresh cannot eat it
+let pendingChat = '';     // same, for the chat box
 
 async function searchWorkshop(page) {
   // The query comes from the box on a new search, but from the last one when paging:
@@ -1214,6 +1291,14 @@ function tokenPrompt(view) {
 
 function render() {
   const view = route();
+  // Rebuilding #c destroys whatever has focus. For the chat box that would mean losing
+  // focus and caret every poll while typing — which is precisely when someone is using
+  // it — so where the focused element comes back with the same id, so does the caret.
+  const active = document.activeElement;
+  const focusId = active && active.id ? active.id : null;
+  const caret = focusId && 'selectionStart' in active ? active.selectionStart : null;
+  const caretEnd = focusId && 'selectionEnd' in active ? active.selectionEnd : null;
+
   document.getElementById('nav').innerHTML = navBar(view);
   document.getElementById('c').innerHTML = tokenPrompt(view) + (
       view.page === 'server' ? renderServer(view.name)
@@ -1235,6 +1320,22 @@ function render() {
   if (qbox) qbox.value = pendingQuery;
   const lbox = document.getElementById('lp');
   if (lbox) lbox.value = localPath;
+  const cbox = document.getElementById('chat');
+  if (cbox) cbox.value = pendingChat;
+  // Pinned to the newest line. Without this a repaint drops the view back to the top of
+  // the feed, which on a busy server means never seeing the message that just arrived.
+  const feed = document.getElementById('feed');
+  if (feed) feed.scrollTop = feed.scrollHeight;
+
+  if (focusId) {
+    const restored = document.getElementById(focusId);
+    if (restored) {
+      restored.focus();
+      if (caret !== null && 'setSelectionRange' in restored) {
+        try { restored.setSelectionRange(caret, caretEnd); } catch (e) { /* not a text field */ }
+      }
+    }
+  }
   dirty = false;
   renderJobs();
 }
@@ -1274,6 +1375,26 @@ async function load() {
           (await get('api/instances/' + encodeURIComponent(view.name) + '/players'))
           || {available: false, reason: 'needs an API token', players: []};
       }
+
+      // The feed is polled every pass, not throttled: it reads a buffer the session
+      // thread already filled, so it costs no RCON traffic at all. On the first look at
+      // an instance it also asks for stored history.
+      const existing = feeds[view.name];
+      const query = existing
+        ? '?after=' + existing.cursor
+        : '?history=' + FEED_HISTORY;
+      const page = await get(
+        'api/instances/' + encodeURIComponent(view.name) + '/feed' + query);
+      if (page) {
+        const kept = existing ? existing.events : [];
+        feeds[view.name] = {
+          live: page.live,
+          reason: page.reason,
+          cursor: page.cursor,
+          // Trimmed, because this grows for as long as the page is open.
+          events: kept.concat(page.events).slice(-FEED_LINES),
+        };
+      }
     }
 
     unauthorized = refused;
@@ -1293,6 +1414,7 @@ async function load() {
     // that half an hour later.
     const snapshot = JSON.stringify(
       [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized, livePlayers,
+       feeds,
        ago(last.updates && last.updates.last_checked),
        ago(last.steam && last.steam.checked_at),
        // The restart countdown is rendered text, not data: the deadline itself does not
@@ -1304,6 +1426,9 @@ async function load() {
     // typed into.
     if (dirty || assigning) return;
     const focused = document.activeElement && document.activeElement.id;
+    // 'chat' is not in this list on purpose: the feed has to keep updating while a
+    // message is being typed, which is exactly when someone is watching it. Its text is
+    // preserved through the repaint instead, via pendingChat.
     if (focused === 'token' || focused === 'q' || focused === 'lp') return;
     painted = snapshot;
     render();
@@ -1319,6 +1444,7 @@ async function load() {
 document.addEventListener('input', e => {
   if (e.target.id === 'q') pendingQuery = e.target.value;
   if (e.target.id === 'lp') localPath = e.target.value;
+  if (e.target.id === 'chat') pendingChat = e.target.value;
 });
 
 render();

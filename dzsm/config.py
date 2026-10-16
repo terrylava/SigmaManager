@@ -187,6 +187,12 @@ class InstanceConfig(BaseModel):
     rcon_enabled: bool = True
     # Env var holding this instance's RCON password, when it differs from the global one.
     rcon_password_env: str | None = None
+    # Hold an RCON connection open while this instance is running, instead of connecting
+    # per request. BattlEye *pushes* connects, disconnects and chat to whoever is
+    # connected and offers no way to ask for any of it afterwards, so a held connection is
+    # the only way to see chat at all — and it makes the player list live rather than
+    # sampled. One connection per running instance; it is not opened while one is down.
+    rcon_live: bool = True
 
     @field_validator("server_executable", "config_file", "mission", "mission_source")
     @classmethod

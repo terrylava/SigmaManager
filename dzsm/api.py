@@ -62,7 +62,7 @@ from dzsm.mods import (
     unused_mods,
     version_status,
 )
-from dzsm.rcon import RconError
+from dzsm.rcon import PlayerSlot, RconError, RconEvent, RconSession, parse_players
 from dzsm.state import State, load_state, save_state
 from dzsm.steam import (
     SteamError,
@@ -113,6 +113,15 @@ class AssignMod(BaseModel):
     # inside the class body, so pydantic resolves the sibling `list[str]` annotation
     # against this field's default and fails at import.
     list_name: str = "mods"
+
+
+class ChatMessage(BaseModel):
+    """Admin chat to send to a server."""
+
+    message: str
+    # BattlEye addresses a single player by their current slot number, which is the
+    # number in the live player list. None broadcasts to everyone.
+    player: int | None = None
 
 
 class InstanceMod(BaseModel):
@@ -270,6 +279,146 @@ def _auto_check(
         _ingest_sessions(config)
 
 
+RECONCILE_SECONDS = 10.0
+
+
+class SessionRegistry:
+    """Holds one live RCON session per running instance that wants one.
+
+    Sessions follow instances rather than being started once at boot: a connection to a
+    stopped server is pointless, and opening one would log a failure every backoff
+    interval forever. Reconciled on a timer, which also covers an instance started or
+    stopped from the CLI in another process.
+    """
+
+    def __init__(self, get_config: Callable[[], Config]) -> None:
+        self._get_config = get_config
+        self._sessions: dict[str, RconSession] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="dzsm-rcon-sessions", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None:
+            thread.join(timeout=3.0)
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            session.stop()
+
+    def get(self, name: str) -> RconSession | None:
+        with self._lock:
+            return self._sessions.get(name)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.reconcile()
+            except Exception:
+                # This thread holds every live connection; it must not die (Rule 3).
+                _log.exception("rcon: session reconcile failed")
+            if self._stop.wait(RECONCILE_SECONDS):
+                break
+
+    def reconcile(self) -> None:
+        """Start sessions for running instances that want one, stop the rest."""
+        config = self._get_config()
+        state = load_state(config.state_file)
+
+        # Deliberately *not* gated on rcon_grace_remaining, unlike every one-shot caller.
+        # The grace exists so a synchronous caller does not sit through a socket timeout
+        # against a port BattlEye has not bound yet. A session is a background thread with
+        # its own backoff, so it can simply keep trying — and waiting out the full 300s
+        # grace would leave the chat feed dead for five minutes after every restart, which
+        # is exactly when an admin is most likely to be watching it.
+        wanted = {
+            name
+            for name, instance in config.instances.items()
+            if instance.rcon_live
+            and instance.rcon_enabled
+            and runner.is_running(config, state, name)
+        }
+
+        with self._lock:
+            running = set(self._sessions)
+
+        for name in running - wanted:
+            session = self._sessions.pop(name, None)
+            if session is not None:
+                _log.info("rcon: stopping live session for %s", name)
+                session.stop()
+
+        for name in wanted - running:
+            port = runner.rcon_port_for(config, name)
+            if port is None:
+                continue
+            session = RconSession(
+                config.rcon.host,
+                port,
+                # A provider, not a value: dzsm can regenerate the BattlEye config, and a
+                # session holding the old password would never reconnect.
+                lambda n=name: runner.rcon_password_for(self._get_config(), n),  # type: ignore[misc]
+                timeout=config.rcon.timeout_seconds,
+                on_event=lambda event, n=name: self._persist(n, event),  # type: ignore[misc]
+            )
+            with self._lock:
+                self._sessions[name] = session
+            session.start()
+            _log.info("rcon: starting live session for %s on port %s", name, port)
+
+    def _persist(self, instance: str, event: RconEvent) -> None:
+        """Write the messages worth keeping. Chat above all — nothing can re-fetch it."""
+        if event.kind not in PERSISTED_EVENTS:
+            return
+        config = self._get_config()
+        try:
+            players.record_event(
+                config,
+                instance,
+                kind=event.kind,
+                raw=event.raw,
+                name=event.name,
+                channel=event.channel,
+                text=event.text,
+            )
+        except players.PlayerStoreError as exc:
+            _log.error("players: could not record %s event: %s", event.kind, exc)
+
+
+# "other" and "admin" are left in the live feed but not stored: BattlEye emits a lot of
+# them and none is worth a row forever.
+PERSISTED_EVENTS = frozenset({"chat", "connect", "disconnect", "kick"})
+
+
+def _players_json(name: str, slots: list[PlayerSlot]) -> dict[str, Any]:
+    return {
+        "instance": name,
+        "available": True,
+        "reason": None,
+        "players": [
+            {
+                "number": slot.number,
+                "name": slot.name,
+                "ping": slot.ping,
+                "guid": slot.guid,
+                "ip": slot.ip,
+                "verified": slot.verified,
+                "lobby": slot.lobby,
+            }
+            for slot in slots
+        ],
+    }
+
+
 def _ingest_sessions(config: Config) -> None:
     """Fold any new admin-log sessions into the ledger.
 
@@ -358,6 +507,9 @@ def create_app(config_path: Path) -> FastAPI:
     config = load_config(config_path)
     jobs = JobRegistry()
     checker_stop = threading.Event()
+    # Reads `config` through a lambda, not a captured value, so a settings edit that
+    # turns rcon_live on or changes a port is picked up at the next reconcile.
+    sessions = SessionRegistry(lambda: config)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -376,11 +528,13 @@ def create_app(config_path: Path) -> FastAPI:
             daemon=True,
         )
         checker.start()
+        sessions.start()
         try:
             yield
         finally:
             checker_stop.set()
             checker.join(timeout=5)
+            sessions.stop()
 
     app = FastAPI(
         title="dzsm",
@@ -475,6 +629,7 @@ def create_app(config_path: Path) -> FastAPI:
                     "keep_mods": instance.keep_mods,
                     "pins": state.pins.get(name, {}),
                     "rcon_port": instance.resolved_rcon_port(),
+                    "rcon_live": instance.rcon_live,
                     "cpu_affinity": instance.cpu_affinity,
                     "priority": instance.priority,
                     "cpu_count": instance.cpu_count,
@@ -567,6 +722,18 @@ def create_app(config_path: Path) -> FastAPI:
         _known_instance(config, name)
         state = current_state()
 
+        # The held session first, before any of the checks below. It is already connected
+        # and proven to answer, so the startup grace does not apply to it — gating on the
+        # grace here reported "RCON is not expected to answer" while the live feed from
+        # that very connection was scrolling past on the same page.
+        session = sessions.get(name)
+        if session is not None and session.status().connected:
+            try:
+                slots = parse_players(session.send("players"))
+            except RconError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            return _players_json(name, slots)
+
         if not runner.is_running(config, state, name):
             return {"instance": name, "available": False, "reason": "not running", "players": []}
 
@@ -593,23 +760,120 @@ def create_app(config_path: Path) -> FastAPI:
         finally:
             client.close()
 
+        return _players_json(name, slots)
+
+    @app.get("/api/instances/{name}/feed", dependencies=writes)
+    def instance_feed(name: str, after: int = 0, history: int = 0) -> dict[str, Any]:
+        """Live messages from the held RCON connection: chat, connects, disconnects.
+
+        `after` is a cursor, not a timestamp, so a client polling fast never sees a line
+        twice and never misses two that arrived in the same second. `history` asks for
+        that many stored messages instead, for the first load of a page.
+        """
+        _known_instance(config, name)
+        session = sessions.get(name)
+
+        stored: list[dict[str, Any]] = []
+        if history:
+            try:
+                stored = [
+                    {
+                        "at": event.at.isoformat(),
+                        "kind": event.kind,
+                        "name": event.name,
+                        "channel": event.channel,
+                        "text": event.text,
+                        "raw": event.raw,
+                        "stored": True,
+                    }
+                    for event in reversed(
+                        players.recent_events(config, instance=name, limit=history)
+                    )
+                ]
+            except players.PlayerStoreError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        if session is None:
+            instance = config.instances[name]
+            reason = (
+                "RCON is off for this instance"
+                if not instance.rcon_enabled
+                else "the live connection is disabled (rcon_live)"
+                if not instance.rcon_live
+                else "not connected — the instance is down or still starting"
+            )
+            return {
+                "instance": name,
+                "live": False,
+                "reason": reason,
+                "cursor": after,
+                "events": stored,
+                "status": None,
+            }
+
+        cursor, fresh = session.events_since(after)
+        status = session.status()
         return {
             "instance": name,
-            "available": True,
-            "reason": None,
-            "players": [
+            "live": status.connected,
+            "reason": None if status.connected else status.last_error,
+            "cursor": cursor,
+            "events": stored
+            + [
                 {
-                    "number": slot.number,
-                    "name": slot.name,
-                    "ping": slot.ping,
-                    "guid": slot.guid,
-                    "ip": slot.ip,
-                    "verified": slot.verified,
-                    "lobby": slot.lobby,
+                    "at": None,
+                    "kind": event.kind,
+                    "name": event.name,
+                    "channel": event.channel,
+                    "text": event.text,
+                    "raw": event.raw,
+                    "stored": False,
                 }
-                for slot in slots
+                for event in fresh
             ],
+            "status": {
+                "connected": status.connected,
+                "since": status.since,
+                "attempts": status.attempts,
+                "events_seen": status.events_seen,
+            },
         }
+
+    @app.post("/api/instances/{name}/say", dependencies=writes)
+    def instance_say(name: str, body: ChatMessage) -> dict[str, Any]:
+        """Send admin chat. Global by default, or to one player by slot number.
+
+        Prefers the held session so this does not open a second connection for one line,
+        and falls back to a one-shot client when there is no live session.
+        """
+        _known_instance(config, name)
+        if not body.message.strip():
+            raise HTTPException(status_code=422, detail="nothing to send")
+
+        session = sessions.get(name)
+        try:
+            if session is not None and session.status().connected:
+                if body.player is None:
+                    session.say(body.message)
+                else:
+                    session.say_to(body.player, body.message)
+                return {"sent": True, "via": "live session"}
+
+            client = runner.rcon_client(config, name)
+            if client is None:
+                raise HTTPException(
+                    status_code=409, detail=f"instance {name!r} has rcon_enabled = false"
+                )
+            try:
+                if body.player is None:
+                    client.say(body.message)
+                else:
+                    client.say_to(body.player, body.message)
+            finally:
+                client.close()
+        except RconError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {"sent": True, "via": "one-shot connection"}
 
     @app.get("/api/players", dependencies=writes)
     def player_ledger(instance: str | None = None, limit: int = 50) -> dict[str, Any]:

@@ -269,6 +269,42 @@ the main one, so a Ctrl-C or service stop shuts both down. Three properties it m
   another thread of the same process; without the reload, the supervisor's older copy
   would overwrite those changes at its next save.
 
+**`RconSession` holds a connection open; `RconClient` is one-shot.** BattlEye *pushes*
+connects, disconnects and **chat** to whoever is connected and offers no command that
+returns any of it afterwards, so a held connection is the only way to see chat at all.
+One session per running instance, started by `api.SessionRegistry`, which reconciles on a
+timer so an instance started or stopped from the CLI in another process is picked up.
+
+Four things in there not to undo:
+
+- **One thread owns the socket.** Commands from other threads go through a queue and wait
+  on an `Event`; nothing else writes to the socket. A second writer racing the receive
+  loop over a reconnect is the bug that appears once a week and never in a test.
+- **The password is a provider, not a value.** dzsm can regenerate the BattlEye config, and
+  a session holding the old password would never reconnect.
+- **Sessions are NOT gated on `rcon_grace_remaining`**, unlike every one-shot caller. The
+  grace stops a synchronous caller sitting through a socket timeout; a session is a
+  background thread with its own backoff, and waiting out the 300s grace would leave the
+  chat feed dead for five minutes after every restart. The same mistake was in the
+  `players` route, where it reported "RCON is not expected to answer" while the live feed
+  from that very connection scrolled past on the same page — check the session *first*.
+- **Pushed messages must be acked** or BattlEye retransmits, and the duplicate shows up as
+  a repeated chat line.
+
+**Multipart command replies are reassembled.** `_command_text` used to return only the
+first part, which was fine when `say` and `#shutdown` were the only commands — `players`
+on a populated server does not fit one datagram, and keeping the first part truncates the
+list silently in the middle.
+
+Message classification is tolerant on purpose: an unrecognised line becomes kind `other`
+with its text intact rather than being dropped, because losing a chat line to a format
+change is worse than showing it unparsed. Connect is matched **before** disconnect, since
+a player can name themselves "x disconnected" — names are attacker-controlled throughout,
+which is also why the dashboard escapes them.
+
+Chat, connects, disconnects and kicks are persisted to `players.db`; the live feed itself
+is a ring buffer. `other` and `admin` are shown but not stored.
+
 **Player data has two sources that must not be merged** (`dzsm/players.py`). RCON
 `players` is the live view — who is on now, their ping, their BattlEye GUID — and works
 regardless of `-adminlog`. The `.ADM` admin log is the durable record, and is enough to

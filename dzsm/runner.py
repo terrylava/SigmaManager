@@ -246,6 +246,36 @@ def _local(value: datetime | None) -> datetime | None:
     return value.astimezone().replace(tzinfo=None)
 
 
+def rcon_port_for(config: Config, instance_name: str) -> int | None:
+    """The port an instance's RCON listens on, or None when it is off or unknown.
+
+    BattlEye's own config is the authority: it is what the server actually read. An
+    explicit setting in dzsm's config overrides it, and the derived port is the last
+    resort.
+    """
+    instance = config.instances[instance_name]
+    if not instance.rcon_enabled:
+        return None
+    return (
+        instance.rcon_port
+        or read_battleye_port(config, instance_name)
+        or instance.resolved_rcon_port()
+    )
+
+
+def rcon_password_for(config: Config, instance_name: str) -> str | None:
+    """An instance's RCON password. The environment wins, then BattlEye's own config.
+
+    Deliberately re-read rather than cached anywhere: dzsm can regenerate the BattlEye
+    config, and a long-lived session holding a stale password would fail to reconnect
+    forever with no indication why.
+    """
+    instance = config.instances[instance_name]
+    return config.rcon.password(instance.rcon_password_env) or read_battleye_password(
+        config, instance_name
+    )
+
+
 def rcon_client(config: Config, instance_name: str) -> RconClient | None:
     """A connected RCON client for this instance, or None when it is not configured.
 
@@ -254,24 +284,11 @@ def rcon_client(config: Config, instance_name: str) -> RconClient | None:
     cannot connect *does* raise, because that is a broken setup worth hearing about.
     """
     instance = config.instances[instance_name]
-    if not instance.rcon_enabled:
-        return None
-
-    # BattlEye's own config is the authority for both: it is what the server actually
-    # read. An explicit setting in dzsm's config overrides, and the derived port is the
-    # last resort.
-    port = (
-        instance.rcon_port
-        or read_battleye_port(config, instance_name)
-        or instance.resolved_rcon_port()
-    )
+    port = rcon_port_for(config, instance_name)
     if port is None:
         return None
 
-    # The environment wins when set, so a password kept elsewhere still works.
-    password = config.rcon.password(instance.rcon_password_env) or read_battleye_password(
-        config, instance_name
-    )
+    password = rcon_password_for(config, instance_name)
     if not password:
         env = instance.rcon_password_env or config.rcon.password_env
         raise RconError(
