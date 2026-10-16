@@ -381,6 +381,61 @@ def write_template(config_file: Path, mission: str) -> None:
         config_file.write_text(updated, encoding="utf-8")
 
 
+def effective_server_dir(config: Config, state: State, instance_name: str) -> Path:
+    """Where this instance's server files are *now*, without preparing anything.
+
+    The read-only counterpart to prepare_server_directory: an isolated instance reads
+    from its own copy once that exists, and from the shared build before it does. Needed
+    because listing what a server has is a question the web UI asks constantly, and
+    answering it must never trigger a multi-GB copy.
+    """
+    if config.instances[instance_name].isolated_server:
+        own = config.instance_dir(instance_name) / "server"
+        if (own / "mpmissions").is_dir():
+            return own
+    source, _ = resolve_server_build(config, state, instance_name)
+    return source
+
+
+def mission_terrain(mission: str) -> str:
+    """The terrain a mission name selects.
+
+    DayZ parses `<MissionName>.<TerrainName>` and loads the world named by the suffix, so
+    the suffix is not decoration — a directory called `x.chernarusplus` holding Livonia
+    files produces a server that starts and is wrong.
+    """
+    return mission.split(".", 1)[1] if "." in mission else DEFAULT_TERRAIN
+
+
+def available_missions(config: Config, state: State, instance_name: str) -> list[str]:
+    """Mission directories this instance's server can load, sorted.
+
+    Returns a list, empty when the server has none or is not installed yet — never None
+    (Rule 1), and never raising, because this exists to populate a picker and a dropdown
+    that cannot be drawn is worse than an empty one.
+    """
+    try:
+        server_dir = effective_server_dir(config, state, instance_name)
+    except InstanceError:
+        return []
+    missions = server_dir / "mpmissions"
+    if not missions.is_dir():
+        return []
+    return sorted(p.name for p in missions.iterdir() if p.is_dir())
+
+
+def resolved_mission_name(config: Config, instance_name: str, source: str) -> str:
+    """What this instance's own mission directory will be called.
+
+    The terrain comes from the *source*, not from anything the user typed, which is what
+    keeps the suffix honest when someone switches map.
+    """
+    instance = config.instances[instance_name]
+    if instance.mission is not None:
+        return instance.mission
+    return f"{config.mission_prefix}_{instance_name}.{mission_terrain(source)}"
+
+
 def prepare_mission(config: Config, server_dir: Path, instance_name: str) -> str | None:
     """Give this instance its own mission directory, seeded from a vanilla one.
 
@@ -445,8 +500,7 @@ def prepare_mission(config: Config, server_dir: Path, instance_name: str) -> str
 
     source = missions / source_name
 
-    terrain = source_name.split(".", 1)[1] if "." in source_name else DEFAULT_TERRAIN
-    mission = instance.mission or f"{config.mission_prefix}_{instance_name}.{terrain}"
+    mission = resolved_mission_name(config, instance_name, source_name)
     target = missions / mission
 
     if not target.exists():

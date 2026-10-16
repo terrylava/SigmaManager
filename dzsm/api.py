@@ -46,9 +46,10 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from dzsm import instance as instance_mod
 from dzsm import players, runner, settings
 from dzsm.config import Config, WorkshopMod, load_config
-from dzsm.instance import InstanceError
+from dzsm.instance import DEFAULT_TERRAIN, InstanceError
 from dzsm.mods import (
     ModCacheError,
     delete_version,
@@ -706,6 +707,48 @@ def create_app(config_path: Path) -> FastAPI:
         job = jobs.create("steam.verify")
         background.add_task(_run_steam_verify, config, jobs, job.id)
         return job
+
+    @app.get("/api/instances/{name}/missions")
+    def instance_missions(name: str) -> dict[str, Any]:
+        """Which missions this instance's server can load, and which it uses.
+
+        A picker rather than a text field: the set is whatever is in the server build's
+        mpmissions/, a typo there fails the start, and nobody remembers that Livonia's
+        terrain is called "enoch".
+        """
+        _known_instance(config, name)
+        instance = config.instances[name]
+        state = current_state()
+        available = instance_mod.available_missions(config, state, name)
+
+        # Vanilla sources are the ones worth seeding from; the rest are per-instance
+        # missions already created, including this instance's own.
+        sources = [m for m in available if not m.startswith(f"{config.mission_prefix}_")]
+        source = instance.mission_source or next(
+            (m for m in sources if instance_mod.mission_terrain(m) == DEFAULT_TERRAIN),
+            sources[0] if sources else None,
+        )
+
+        return {
+            "instance": name,
+            "available": [
+                {
+                    "name": mission,
+                    "terrain": instance_mod.mission_terrain(mission),
+                    "seeded": mission.startswith(f"{config.mission_prefix}_"),
+                }
+                for mission in available
+            ],
+            "mission_source": instance.mission_source,
+            "mission": instance.mission,
+            # What the instance will actually run at its next start. Shown because the
+            # derived name is not obvious and is the thing that decides the terrain.
+            "resolved": instance_mod.resolved_mission_name(config, name, source)
+            if source
+            else None,
+            "per_instance": config.per_instance_missions,
+            "prefix": config.mission_prefix,
+        }
 
     @app.get("/api/instances/{name}/players", dependencies=writes)
     def instance_players(name: str) -> dict[str, Any]:

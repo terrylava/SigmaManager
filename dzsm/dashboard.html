@@ -122,6 +122,16 @@ const LIVE_PLAYERS_SECONDS = 10;
 let feeds = {};
 const FEED_HISTORY = 50;   // stored lines to load when first opening a server page
 const FEED_LINES = 300;    // how much to keep in the page before trimming
+
+// Available missions per instance. Keyed by instance and deleted on save, which is what
+// makes the next paint re-read the resolved name from the server rather than guess it.
+const missions = {};
+
+// The map someone has picked but not yet saved, per instance. Held outside the DOM for
+// the same reason the search and chat boxes are: a repaint rebuilds the panel, and a
+// <select> rebuilt from server state loses the choice. Reading the value back out of the
+// element at save time meant a repaint landing in between silently saved the *old* map.
+const pendingMission = {};
 let last = {instances: [], versions: [], server: {builds: []}, mods: [], global: null,
             updates: null, steam: null};
 
@@ -234,9 +244,14 @@ document.addEventListener('keydown', e => {
 // typing in it. Scoped to [data-form] so search boxes and the token field, which are
 // preserved separately, do not freeze the page's live updates.
 let dirty = false;
-document.addEventListener('input', e => {
-  if (e.target.closest('[data-form]')) dirty = true;
-});
+// Both events: a text field fires `input`, but a <select> or checkbox someone has just
+// changed is only reliably reported by `change`. Missing that left a repaint free to
+// rebuild a panel out from under an unsaved choice.
+for (const kind of ['input', 'change']) {
+  document.addEventListener(kind, e => {
+    if (e.target.closest('[data-form]')) dirty = true;
+  });
+}
 
 const val = id => {
   const el = document.getElementById(id);
@@ -260,6 +275,31 @@ const actions = {
   modsUpdate: () => post('api/mods/update', 'Mod update'),
   serverUpdate: () => post('api/server/update', 'Server app update'),
   verifySteam: () => post('api/steam/verify', 'Steam session check'),
+
+  // Live preview without a round trip: the derived name's suffix comes from the chosen
+  // source, and seeing it change is what makes clear that picking a map renames the world.
+  previewMission: (d, el) => {
+    pendingMission[d.name] = el.value;
+    const m = missions[d.name];
+    const label = document.getElementById('missionname');
+    if (!m || !label) return;
+    label.textContent = m.mission
+      || m.prefix + '_' + d.name + '.' + el.value.split('.').pop();
+  },
+
+  saveMission: async d => {
+    // The held choice, not the element's current value: see pendingMission.
+    const source = pendingMission[d.name] || val('f-missionsource');
+    if (!source) return;
+    // mission_source only. `mission` is left alone deliberately: when it is unset the
+    // name derives from this source, and when someone has set it explicitly, silently
+    // rewriting it would undo a decision they made by hand.
+    if (await send('PATCH', 'api/instances/' + encodeURIComponent(d.name) + '/settings',
+                   {mission_source: source}, 'Map for ' + d.name + ' saved')) {
+      delete missions[d.name];        // refetch, so the resolved name comes from the server
+      delete pendingMission[d.name];  // saved, so it is no longer pending
+    }
+  },
 
   sendChat: async d => {
     const box = document.getElementById('chat');
@@ -732,6 +772,24 @@ function cfgPanel(name) {
 
 const LIST_LABELS = {mods: 'loaded', server_mods: 'server only', keep_mods: 'kept, not loaded'};
 
+// DayZ's terrain names are not the names anyone uses for the maps. Nobody remembers that
+// Livonia's terrain is "enoch", and picking the wrong one is a server that starts on the
+// wrong world.
+const TERRAIN_NAMES = {
+  chernarusplus: 'Chernarus',
+  enoch: 'Livonia',
+  sakhal: 'Sakhal',
+  chernarusplusgloom: 'Chernarus (Gloom)',
+  namalsk: 'Namalsk',
+  banov: 'Banov',
+  deerisle: 'DeerIsle',
+  takistanplus: 'Takistan',
+  valning: 'Valning',
+  esseker: 'Esseker',
+  rostow: 'Rostow',
+  pripyat: 'Pripyat',
+};
+
 function listContaining(instance, name) {
   if ((instance.mods || []).includes(name)) return 'mods';
   if ((instance.server_mods || []).includes(name)) return 'server_mods';
@@ -756,6 +814,57 @@ function instanceModRow(i, name, list, order) {
     + '<td><button data-act="instLocalize"' + dataset + d + '>Local copy</button>'
       + '<button class="danger" data-act="instRemoveMod"' + dataset + d + '>Remove</button>'
     + '</tr>';
+}
+
+function missionPanel(i) {
+  const m = missions[i.name];
+  if (m === undefined) return '<h2>Map</h2><div class="panel"><p class="note">Loading&hellip;</p></div>';
+
+  const sources = m.available.filter(x => !x.seeded);
+  if (!sources.length) {
+    return '<h2>Map</h2><div class="panel"><p class="note">No missions found in this '
+      + 'server\'s <code>mpmissions</code>. Download the server app first.</p></div>';
+  }
+
+  const current = pendingMission[i.name]
+    || m.mission_source
+    || (sources.find(x => m.resolved && x.terrain === m.resolved.split('.').pop()) || sources[0]).name;
+
+  const option = x =>
+    '<option' + attr('value', x.name) + (x.name === current ? ' selected' : '') + '>'
+    + esc(x.name) + '  (' + esc(TERRAIN_NAMES[x.terrain] || x.terrain) + ')</option>';
+
+  const changing = m.resolved
+    && current.split('.').pop() !== m.resolved.split('.').pop();
+
+  return '<h2>Map</h2><div class="panel" data-form>'
+    + '<div class="field"><label>Seed from</label>'
+      + '<select id="f-missionsource" data-change="previewMission"'
+      + attr('data-name', i.name) + '>' + sources.map(option).join('') + '</select>'
+      + '<span class="note">the vanilla mission this server\'s world is copied from</span>'
+    + '</div>'
+    // Derived from the *selected* source, not from m.resolved, so an unsaved pick shows
+    // the name it would actually run as. Same expression previewMission uses, so a
+    // repaint and a live preview never disagree.
+    + '<div class="field"><label>Runs as</label><code id="missionname">'
+      + esc(m.mission || m.prefix + '_' + i.name + '.' + current.split('.').pop())
+      + '</code>'
+      + '<span class="note">its own copy, yours to edit &mdash; '
+      + (m.mission ? 'set explicitly' : 'derived from the map and instance name') + '</span>'
+    + '</div>'
+    + (changing
+       ? '<div class="field"><label>&nbsp;</label><span class="warn">Changing the map '
+         + 'seeds a new world.</span><span class="note">The current one stays on disk '
+         + 'under its old name, so switching back keeps your economy and saves.</span></div>'
+       : '')
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="saveMission"' + attr('data-name', i.name)
+      + (busy ? ' disabled' : '') + '>Save</button>'
+      + '<span class="note">applies at the next start</span></div>'
+    + '<p class="note">Mission folders hold <code>types.xml</code>, '
+      + '<code>events.xml</code>, <code>init.c</code> and the persistence storage, which '
+      + 'is why each server gets its own rather than sharing one.</p>'
+    + '</div>';
 }
 
 function playersPanel(i) {
@@ -894,6 +1003,7 @@ function renderServer(name) {
   if (cfgEditing === i.name) h += cfgPanel(i.name);
   h += playersPanel(i);
   h += feedPanel(i);
+  h += missionPanel(i);
   h += launchPanel(i);
   h += instanceModsPanel(i);
   return h;
@@ -1376,6 +1486,13 @@ async function load() {
           || {available: false, reason: 'needs an API token', players: []};
       }
 
+      // Missions change only when a server build is downloaded or a map is saved, so
+      // they are fetched once per instance and dropped from the cache on a save.
+      if (missions[view.name] === undefined) {
+        const list = await get('api/instances/' + encodeURIComponent(view.name) + '/missions');
+        if (list) missions[view.name] = list;
+      }
+
       // The feed is polled every pass, not throttled: it reads a buffer the session
       // thread already filled, so it costs no RCON traffic at all. On the first look at
       // an instance it also asks for stored history.
@@ -1414,7 +1531,7 @@ async function load() {
     // that half an hour later.
     const snapshot = JSON.stringify(
       [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized, livePlayers,
-       feeds,
+       feeds, missions,
        ago(last.updates && last.updates.last_checked),
        ago(last.steam && last.steam.checked_at),
        // The restart countdown is rendered text, not data: the deadline itself does not

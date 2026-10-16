@@ -553,6 +553,31 @@ class Config(BaseModel):
         return v
 
     @model_validator(mode="after")
+    def _mission_terrain_matches_its_source(self) -> Config:
+        """An explicit `mission` must name the same terrain as the mission it seeds from.
+
+        DayZ parses "<MissionName>.<TerrainName>" and loads the world named by the
+        suffix. So `mission = "pvp.chernarusplus"` seeded from `dayzOffline.enoch` gives a
+        directory full of Livonia files that the engine loads as Chernarus — a server that
+        starts, reports healthy, and is wrong. The derived name cannot hit this because it
+        takes its suffix from the source; only a hand-written one can.
+        """
+        for name, instance in self.instances.items():
+            if instance.mission is None or instance.mission_source is None:
+                continue
+            wanted = instance.mission.partition(".")[2]
+            seeded = instance.mission_source.partition(".")[2]
+            if wanted and seeded and wanted != seeded:
+                raise ValueError(
+                    f"instance {name!r}: mission {instance.mission!r} names terrain "
+                    f"{wanted!r} but mission_source {instance.mission_source!r} is "
+                    f"{seeded!r}. The engine loads the terrain named by the suffix, so "
+                    f"this would run {seeded!r} content as {wanted!r}. Either match the "
+                    f"suffixes or leave `mission` unset to have it derived."
+                )
+        return self
+
+    @model_validator(mode="after")
     def _ports_are_unique(self) -> Config:
         seen: dict[int, str] = {}
         for name, instance in self.instances.items():
