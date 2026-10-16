@@ -399,6 +399,13 @@ const GLOBAL_FIELDS = [
    note: 'minutes between automatic checks; 0 turns them off'},
   {k: 'mod_check_auto_download', t: 'bool', label: 'Download what it finds',
    note: 'safe while servers run - a new version is only activated at the next restart'},
+  {k: 'check_server_build', t: 'bool', label: 'Check for game updates',
+   note: 'asks Steam for the server app build on the same interval; downloads nothing'},
+  {k: 'server_update_auto_download', t: 'bool', label: 'Download game updates',
+   note: 'several GB, unlike a mod check'},
+  {k: 'server_update_grace_minutes', t: 'num', label: 'Restart after update',
+   note: 'minutes to warn players before restarting onto a new build; 0 waits for the '
+       + 'normal schedule'},
   {k: 'gc_retention_days', t: 'num', label: 'Keep unused versions',
    note: 'days before automatic deletion; blank never deletes anything'},
   {k: 'download_timeout_seconds', t: 'num', label: 'Download timeout', note: 'seconds'},
@@ -505,6 +512,67 @@ function managerPanel() {
     + '</div>';
 }
 
+function countdown(iso) {
+  const seconds = (new Date(iso).getTime() - Date.now()) / 1000;
+  if (seconds <= 0) return 'now';
+  if (seconds < 90) return 'in ' + Math.round(seconds) + 's';
+  return 'in ' + Math.round(seconds / 60) + ' min';
+}
+
+function serverCountdowns() {
+  const s = last.updates && last.updates.server;
+  if (!s) return '';
+  return Object.values(s.restarting || {}).map(countdown).join(',')
+       + '|' + ago(s.checked_at);
+}
+
+function gameUpdateBanner() {
+  const s = last.updates && last.updates.server;
+  if (!s) return '';
+
+  let h = '';
+  // Not an early return: a build can be downloaded by hand with checking off, and the
+  // grace restart and pin warning below still apply when it has been.
+  if (!s.checking) {
+    h += '<p class="note">Not checking for game updates. When DayZ updates, clients '
+      + 'update themselves and a server left on the old build stops accepting them.</p>';
+  } else if (s.update_available) {
+    h += '<p><span class="warn">Game update available</span> &mdash; Steam has build '
+      + '<code>' + esc(s.latest) + '</code>, this install has '
+      + (s.installed ? '<code>' + esc(s.installed) + '</code>' : 'none')
+      + '. <span class="note">Clients update themselves, so servers on the old build '
+      + 'will refuse them'
+      + (s.auto_download ? '. Downloading automatically.' : ' &mdash; press Update server app.')
+      + '</span></p>';
+  } else if (s.latest) {
+    h += '<p class="note">Game build <code>' + esc(s.latest) + '</code> is current '
+      + '&mdash; checked ' + esc(ago(s.checked_at)) + '.</p>';
+  } else {
+    h += '<p class="note">Game build not checked yet.</p>';
+  }
+
+  // Instances already holding a newer build on disk, counting down to the restart that
+  // picks it up. This is the only place that window is visible before it happens.
+  const restarting = Object.entries(s.restarting || {});
+  if (restarting.length) {
+    h += '<p><span class="held">Restarting onto the new build</span>: '
+      + restarting.map(([name, at]) =>
+          '<a href="#/server/' + encodeURIComponent(name) + '">' + esc(name) + '</a> '
+          + esc(countdown(at))).join(', ')
+      + ' <span class="note">&mdash; players are being warned over RCON</span></p>';
+  }
+
+  if ((s.pinned_behind || []).length) {
+    h += '<p><span class="warn">Pinned to an older build</span>: '
+      + s.pinned_behind.map(n =>
+          '<a href="#/server/' + encodeURIComponent(n) + '">' + esc(n) + '</a>').join(', ')
+      + ' <span class="note">&mdash; a <code>server_build</code> pin is never moved '
+      + 'automatically, so these will not accept updated clients until the pin changes'
+      + '</span></p>';
+  }
+  return h;
+}
+
 function overviewRow(i) {
   const state = i.running
     ? '<span class="run">running</span>'
@@ -546,7 +614,7 @@ function renderOverview() {
 
   h += steamPanel() + managerPanel();
 
-  h += '<h2>Server app</h2><table><tr><th>Build<th></tr>';
+  h += '<h2>Server app</h2>' + gameUpdateBanner() + '<table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
     '<tr><td><code>' + esc(b) + '</code><td>' + (b === last.server.active ? 'newest' : '') + '</tr>'
   ).join('');
@@ -1172,7 +1240,10 @@ async function load() {
     const snapshot = JSON.stringify(
       [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized,
        ago(last.updates && last.updates.last_checked),
-       ago(last.steam && last.steam.checked_at)],
+       ago(last.steam && last.steam.checked_at),
+       // The restart countdown is rendered text, not data: the deadline itself does not
+       // move, so without this "in 7 min" would sit there until something else changed.
+       serverCountdowns()],
       (k, v) => (k === 'age_days' && typeof v === 'number' ? v.toFixed(1) : v));
     if (snapshot === painted) return;
     // Never repaint over unsaved edits, an open assignment panel, or a search box being

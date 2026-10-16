@@ -118,7 +118,10 @@ class FileLocked(SettingsError):
 def read_document(path: Path) -> TOMLDocument:
     """Parse config.toml preserving comments and formatting."""
     try:
-        return tomlkit.parse(path.read_text(encoding="utf-8"))
+        # utf-8-sig for the same reason as load_config: an editor-added byte-order mark
+        # must not make the file unparseable. Saving writes plain UTF-8, so a round trip
+        # through here quietly drops the mark rather than preserving it.
+        return tomlkit.parse(path.read_text(encoding="utf-8-sig"))
     except OSError as exc:
         raise SettingsError(f"cannot read {path}: {exc}") from exc
     except Exception as exc:  # tomlkit raises several parse error types
@@ -573,7 +576,7 @@ def save_raw(path: Path, text: str) -> Config:
 
 def read_config_text(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except OSError as exc:
         raise SettingsError(f"cannot read {path}: {exc}") from exc
 

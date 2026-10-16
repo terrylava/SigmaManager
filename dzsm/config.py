@@ -149,6 +149,10 @@ class RconConfig(BaseModel):
     final_warning_interval_seconds: int = 4
     # {remaining} is filled with a human phrase like "2 minutes" or "20 seconds".
     warning_message: str = "Server restart in {remaining}"
+    # Used instead when the restart is because the game itself updated. Worth its own
+    # wording: players whose client just updated and cannot connect are owed the reason,
+    # and "server restart" reads like the routine one they can wait out.
+    update_warning_message: str = "Game update - server restarting in {remaining}"
     # Stop servers with RCON's #shutdown rather than signalling the process, so DayZ
     # closes down on its own terms and flushes persistence. Falls back to terminate then
     # kill if it does not exit.
@@ -329,6 +333,23 @@ class Config(BaseModel):
     # cache and is not used by anything until an instance next starts. Off by default
     # anyway — it spends bandwidth and disk without being asked.
     mod_check_auto_download: bool = False
+    # Also ask Steam whether the *server app* has a new build, on the same interval. This
+    # is the one that matters most and is easiest to miss: when DayZ updates, clients
+    # update themselves and a server left on the old build stops accepting them entirely.
+    # Costs one steamcmd `app_info_print` per check, which downloads nothing.
+    check_server_build: bool = True
+    # Download a new server build automatically. Off by default: several GB, unlike a
+    # mod check. Nothing activates it until an instance restarts either way.
+    server_update_auto_download: bool = False
+    # Once a newer server build is on disk, restart instances onto it after this many
+    # minutes, warning players over RCON meanwhile. 0 leaves it to the normal restart
+    # schedule.
+    #
+    # A grace period rather than an immediate restart: the server is unjoinable from the
+    # moment the game updates, so waiting for a scheduled restart hours away is its own
+    # outage — but throwing players out mid-session with no warning is worse than ten
+    # minutes of being unable to take new ones.
+    server_update_grace_minutes: int = 10
     # Grace period for a server to shut down before it is killed. DayZ flushes
     # persistence on exit, so do not make this small.
     stop_timeout_seconds: int = 60
@@ -499,6 +520,16 @@ class Config(BaseModel):
             )
         return v
 
+    @field_validator("server_update_grace_minutes")
+    @classmethod
+    def _grace_cannot_be_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"server_update_grace_minutes cannot be negative, got {v}. Use 0 to leave "
+                f"a new build to the normal restart schedule."
+            )
+        return v
+
     @field_validator("mod_check_interval_minutes")
     @classmethod
     def _check_interval_cannot_be_negative(cls, v: int) -> int:
@@ -552,7 +583,12 @@ def load_config(path: Path) -> Config:
         raise ConfigError(f"cannot read config at {path}: {exc}") from exc
 
     try:
-        data = tomllib.loads(raw.decode("utf-8"))
+        # utf-8-sig, not utf-8: Notepad and PowerShell's `Set-Content -Encoding utf8`
+        # both write a byte-order mark, and decoded as plain UTF-8 it becomes a U+FEFF
+        # character before the first key. TOML then rejects the file with "Invalid
+        # statement (at line 1, column 1)", which tells the reader nothing about why.
+        # Same reasoning as prepare_server_config, where this already bit once.
+        data = tomllib.loads(raw.decode("utf-8-sig"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
 

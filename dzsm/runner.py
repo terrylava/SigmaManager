@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -348,7 +349,7 @@ def supervise(
     if not instance_names:
         raise RunnerError("no instances to supervise")
 
-    due: dict[str, datetime | None] = {}
+    due: dict[str, Due] = {}
     warned: dict[str, datetime] = {}
     for name in instance_names:
         if name in state.held:
@@ -379,10 +380,17 @@ def supervise(
                     # until someone starts it.
                     continue
 
-                scheduled = due[name]
+                scheduled = due[name].at
+                updating = due[name].update
                 if scheduled is not None and now >= scheduled:
-                    _log.info("instance %s: scheduled restart", name)
-                    _warn_players(config, state, name, warned, remaining=0.0, final=True)
+                    _log.info(
+                        "instance %s: %s restart",
+                        name,
+                        "server build update" if updating else "scheduled",
+                    )
+                    _warn_players(
+                        config, state, name, warned, remaining=0.0, final=True, update=updating
+                    )
                     _restart_and_save(config, state, name)
                     warned.pop(name, None)
                     # Recomputed after the restart, so an uptime-based window starts
@@ -398,6 +406,7 @@ def supervise(
                         name,
                         warned,
                         remaining=(scheduled - now).total_seconds(),
+                        update=updating,
                     )
 
                 if not is_running(config, state, name):
@@ -485,7 +494,7 @@ def warning_interval(config: Config, remaining: float) -> int | None:
     return None
 
 
-def _tick_seconds(config: Config, due: Mapping[str, datetime | None]) -> float:
+def _tick_seconds(config: Config, due: Mapping[str, Due]) -> float:
     """How long to sleep before the next pass.
 
     The poll interval, shortened when an instance is close enough to a restart that
@@ -495,7 +504,8 @@ def _tick_seconds(config: Config, due: Mapping[str, datetime | None]) -> float:
     """
     now = datetime.now()
     tick = float(config.supervise_poll_seconds)
-    for scheduled in due.values():
+    for entry in due.values():
+        scheduled = entry.at
         if scheduled is None:
             continue
         remaining = (scheduled - now).total_seconds()
@@ -515,12 +525,15 @@ def _warn_players(
     *,
     remaining: float,
     final: bool = False,
+    update: bool = False,
 ) -> None:
-    """Announce an incoming restart over RCON.
+    """Announce an incoming restart over RCON, as global admin chat (`say -1`).
 
     Rate-limited to the configured interval, and completely non-fatal: an unreachable
     RCON port must never delay or prevent the restart itself (Rule 4). A failure is
     logged once per attempt and the loop carries on.
+
+    `update` picks the game-update wording over the routine-restart one.
     """
     now = datetime.now()
     last = warned.get(instance_name)
@@ -536,7 +549,10 @@ def _warn_players(
     if rcon_grace_remaining(config, state, instance_name) > 0:
         return
 
-    message = config.rcon.warning_message.format(remaining=humanize(remaining))
+    template = (
+        config.rcon.update_warning_message if update else config.rcon.warning_message
+    )
+    message = template.format(remaining=humanize(remaining))
     try:
         client = rcon_client(config, instance_name)
     except RconError as exc:
@@ -639,13 +655,67 @@ def _apply_process_tuning(instance: InstanceConfig, pid: int, instance_name: str
             )
 
 
-def _due_at(config: Config, state: State, instance_name: str) -> datetime | None:
+@dataclass(frozen=True)
+class Due:
+    """When an instance restarts next, and what is asking for it.
+
+    The reason travels with the time because it decides what players are told: a routine
+    restart and a game update read very differently to someone who has just been unable
+    to connect.
+    """
+
+    at: datetime | None
+    # True when the soonest deadline is a newly downloaded server build rather than the
+    # ordinary schedule.
+    update: bool = False
+
+
+def build_restart_due(
+    config: Config, state: State, instance_name: str
+) -> datetime | None:
+    """When this instance should restart to pick up a newer server build, if ever.
+
+    Derived rather than stored, which is what makes it self-clearing: once the instance
+    restarts, `state.server_builds[name]` equals the promoted build and this returns None
+    on its own. A stored deadline would need clearing at exactly the right moment, and a
+    missed clear means a restart loop.
+
+    Returns None for an instance pinned with `server_build` — that pin is a deliberate
+    statement about which build to run, and a grace period is not permission to override
+    it. The divergence is reported instead.
+    """
+    grace = config.server_update_grace_minutes
+    if grace <= 0:
+        return None
+
+    target = state.serverapp_version
+    promoted = _local(state.serverapp_promoted_at)
+    if target is None or promoted is None:
+        return None
+    if config.instances[instance_name].server_build is not None:
+        return None
+
+    running = state.server_builds.get(instance_name)
+    # None means the instance has never started under a recorded build, so there is
+    # nothing to move it off of; it will pick the newest up whenever it does start.
+    if running is None or running == target:
+        return None
+
+    return promoted + timedelta(minutes=grace)
+
+
+def _due_at(config: Config, state: State, instance_name: str) -> Due:
     """When this instance is next due to restart, using its current process start time."""
     process = state.processes.get(instance_name)
-    return next_restart(
+    scheduled = next_restart(
         config.instances[instance_name],
         started_at=process.started_at if process else None,
     )
+    update = build_restart_due(config, state, instance_name)
+
+    if update is not None and (scheduled is None or update <= scheduled):
+        return Due(at=update, update=True)
+    return Due(at=scheduled)
 
 
 def _request_shutdown(config: Config, state: State, instance_name: str) -> bool:

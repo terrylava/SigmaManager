@@ -106,8 +106,8 @@ def test_due_at_uses_the_recorded_process(config: Config) -> None:
 
     due = runner._due_at(cfg, state, "chernarus")
 
-    assert due is not None
-    assert timedelta(hours=2.9) < (due - datetime.now()) < timedelta(hours=3.1)
+    assert due.at is not None
+    assert timedelta(hours=2.9) < (due.at - datetime.now()) < timedelta(hours=3.1)
 
 
 # --- graceful shutdown -------------------------------------------------------

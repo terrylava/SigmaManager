@@ -273,32 +273,32 @@ def test_nothing_is_said_outside_both_windows(
 
 
 def test_the_loop_ticks_slowly_when_no_restart_is_near(cfg: Config) -> None:
-    due = {"chernarus": datetime.now() + timedelta(hours=3)}
+    due = {"chernarus": runner.Due(datetime.now() + timedelta(hours=3))}
     assert runner._tick_seconds(cfg, due) == cfg.supervise_poll_seconds
 
 
 def test_the_loop_ticks_fast_inside_the_final_window(cfg: Config) -> None:
     """A 15s poll cannot deliver a message every 4s, so the tick has to shorten."""
-    due = {"chernarus": datetime.now() + timedelta(seconds=60)}
+    due = {"chernarus": runner.Due(datetime.now() + timedelta(seconds=60))}
 
     assert runner._tick_seconds(cfg, due) == cfg.rcon.final_warning_interval_seconds
 
 
 def test_the_early_window_does_not_slow_the_loop_down(cfg: Config) -> None:
     """The early tier warns every 5 minutes, but crash detection still needs the poll."""
-    due = {"chernarus": datetime.now() + timedelta(minutes=20)}
+    due = {"chernarus": runner.Due(datetime.now() + timedelta(minutes=20))}
 
     assert runner._tick_seconds(cfg, due) == cfg.supervise_poll_seconds
 
 
 def test_an_instance_with_no_schedule_does_not_speed_up_the_loop(cfg: Config) -> None:
-    assert runner._tick_seconds(cfg, {"chernarus": None}) == cfg.supervise_poll_seconds
+    assert runner._tick_seconds(cfg, {"chernarus": runner.Due(None)}) == cfg.supervise_poll_seconds
 
 
 def test_a_custom_interval_is_honoured(config: Config) -> None:
     tuned = config.model_copy(
         update={"rcon": RconConfig(final_warning_interval_seconds=10)}
     )
-    due = {"chernarus": datetime.now() + timedelta(seconds=30)}
+    due = {"chernarus": runner.Due(datetime.now() + timedelta(seconds=30))}
 
     assert runner._tick_seconds(tuned, due) == 10

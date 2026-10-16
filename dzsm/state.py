@@ -69,6 +69,15 @@ class State(BaseModel):
     server_builds: dict[str, str] = Field(default_factory=dict)
     # Installed server app version, if any.
     serverapp_version: str | None = None
+    # When serverapp_version last changed. The grace period before instances restart onto
+    # a new build counts from here, so it is a property of the build having arrived rather
+    # than of any one instance — and it survives a daemon restart, which an in-memory
+    # timer would not.
+    serverapp_promoted_at: datetime | None = None
+    # The build id Steam publishes for the configured branch, from the last check. The
+    # server-app counterpart of last_seen_remote.
+    latest_remote_server_build: str | None = None
+    server_build_checked_at: datetime | None = None
     # When Steam was last asked what changed. Separate from last_seen_remote, which only
     # records the answer: without this there is no way to tell "nothing has changed" from
     # "nothing has been checked", and those need very different responses.

@@ -71,6 +71,7 @@ from dzsm.steam import (
     check_updates,
     download_mod,
     get_workshop_item,
+    remote_server_build,
     search_workshop,
     update_server_app,
     verify_download,
@@ -255,6 +256,55 @@ def _auto_check(
         if found and config.mod_check_auto_download:
             download = jobs.create("mods.update")
             _run_mod_update(config, jobs, download.id)
+
+        # Separate from the mod check and deliberately after it: this one costs a steamcmd
+        # run and needs a working session, so a broken sentry must not stop mods being
+        # checked over the Web API, which needs neither.
+        if config.check_server_build:
+            _check_server_build(config, jobs)
+
+
+def _check_server_build(config: Config, jobs: JobRegistry) -> None:
+    """Ask Steam whether the server app has a newer build, and act on the answer.
+
+    This is the half of "game updates" that nothing used to cover. A mod check talks to
+    the Web API about workshop items and never learns that DayZ itself moved, so a server
+    could sit on an old build — unjoinable, because clients update themselves — while the
+    dashboard reported everything healthy.
+    """
+    if jobs.is_running("server.update"):
+        return
+
+    job = jobs.create("server.check")
+    state = load_state(config.state_file)
+    try:
+        remote = remote_server_build(config)
+    except SteamError as exc:
+        _log.error("server build check failed: %s", exc)
+        _note_steam_session(config, state, exc)
+        save_state(config.state_file, state)
+        jobs.finish(job.id, ok=False, detail=str(exc))
+        return
+
+    state.latest_remote_server_build = remote
+    state.server_build_checked_at = datetime.now(UTC)
+    _note_steam_session(config, state, None)
+    save_state(config.state_file, state)
+
+    behind = remote != state.serverapp_version
+    jobs.finish(
+        job.id,
+        ok=True,
+        detail=(
+            f"server build {remote} available (running {state.serverapp_version})"
+            if behind
+            else f"server build {remote} is current"
+        ),
+    )
+
+    if behind and config.server_update_auto_download:
+        download = jobs.create("server.update")
+        _run_server_update(config, jobs, download.id, False)
 
 
 def _check_and_record(config: Config) -> dict[str, int]:
@@ -490,11 +540,44 @@ def create_app(config_path: Path) -> FastAPI:
             latest = state.last_seen_remote.get(mod.workshop_id)
             if latest is not None and latest not in state.known_versions(mod.workshop_id):
                 behind.append(name)
+        remote_build = state.latest_remote_server_build
+        running_build = state.serverapp_version
+        # An instance pinned to a build that is no longer the newest. Reported rather
+        # than acted on: the pin is a deliberate choice, but after a game update it also
+        # means that instance will not accept the updated clients, and nothing else here
+        # would ever say so.
+        pinned_behind = sorted(
+            name
+            for name, instance in config.instances.items()
+            if instance.server_build is not None
+            and remote_build is not None
+            and instance.server_build != remote_build
+        )
         return {
             "last_checked": state.last_checked_at.isoformat() if state.last_checked_at else None,
             "interval_minutes": config.mod_check_interval_minutes,
             "auto_download": config.mod_check_auto_download,
             "available": sorted(behind),
+            "server": {
+                "checking": config.check_server_build,
+                "installed": running_build,
+                "latest": remote_build,
+                "update_available": remote_build is not None and remote_build != running_build,
+                "checked_at": (
+                    state.server_build_checked_at.isoformat()
+                    if state.server_build_checked_at
+                    else None
+                ),
+                "auto_download": config.server_update_auto_download,
+                "grace_minutes": config.server_update_grace_minutes,
+                "pinned_behind": pinned_behind,
+                # Instances that will restart onto a newly downloaded build, and when.
+                "restarting": {
+                    name: due.isoformat()
+                    for name in config.instances
+                    if (due := runner.build_restart_due(config, state, name)) is not None
+                },
+            },
         }
 
     @app.get("/api/versions")
@@ -1256,7 +1339,12 @@ def _run_server_update(config: Config, jobs: JobRegistry, job_id: str, validate:
             return
 
     state = load_state(config.state_file)
+    if state.serverapp_version != build_id:
+        # Stamped only on an actual change, so re-running an update does not keep pushing
+        # the grace period out and leave instances never restarting onto the new build.
+        state.serverapp_promoted_at = datetime.now(UTC)
     state.serverapp_version = build_id
+    state.latest_remote_server_build = build_id
     _note_steam_session(config, state, None)
     save_state(config.state_file, state)
     jobs.finish(job_id, ok=True, detail=f"server app at build {build_id}")

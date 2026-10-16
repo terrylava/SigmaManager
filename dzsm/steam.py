@@ -71,6 +71,10 @@ STEAM_GUARD_MARKERS = (
     "two-factor code",
 )
 
+# What Steam calls the default branch in app metadata. `server_branch = None` means this
+# one; the VDF never calls it "stable" or "default".
+PUBLIC_BRANCH = "public"
+
 # Steam Web API per-item result code for success.
 _RESULT_OK = 1
 
@@ -619,6 +623,72 @@ def update_server_app(config: Config, *, validate: bool = False) -> str:
         _log.info("steam: server app already at build %s", build_id)
 
     return build_id
+
+
+def remote_server_build(config: Config, *, timeout: float = 120.0) -> str:
+    """The build id Steam currently publishes for the server app, without downloading it.
+
+    There is no Web API equivalent of GetPublishedFileDetails for an app's branch build,
+    so this goes through steamcmd's `app_info_print`, which prints the app's metadata and
+    transfers no content. It takes seconds rather than the better part of an hour, which
+    is what makes it usable on a timer.
+
+    Needs a working session like any other steamcmd call, so a stale sentry surfaces here
+    as SteamLoginFailed and feeds the same session status everything else does.
+
+    Returns the build id. Raises SteamError when it cannot be determined — a guess here
+    would either hide a game update or invent one (Rule 1, Rule 3).
+    """
+    appid = config.server_appid
+    branch = config.server_branch or PUBLIC_BRANCH
+    run = _run_steamcmd(
+        config.steam,
+        [
+            *_login_args(config.steam),
+            # app_info_update 1 forces a refresh; without it steamcmd happily prints a
+            # cached copy from before the update being looked for.
+            "+app_info_update",
+            "1",
+            "+app_info_print",
+            str(appid),
+            "+quit",
+        ],
+        timeout=timeout,
+    )
+    _raise_for_output(run.output, context=f"server app {appid} info")
+
+    build_id = _branch_buildid(run.output, branch)
+    if build_id is None:
+        raise SteamError(
+            f"could not read the {branch!r} branch build id for app {appid} from "
+            f"steamcmd's app info. The branch may not exist, or the output format may "
+            f"have changed.\n{_tail(run.output)}"
+        )
+    return build_id
+
+
+def _branch_buildid(output: str, branch: str) -> str | None:
+    """Pull one branch's buildid out of `app_info_print` output.
+
+    Walks to the branches section and then to the named branch, rather than regexing the
+    whole output for a buildid: the app has one at its top level and every depot carries
+    its own, so a blind search would return something plausible and wrong.
+    """
+    start = output.find('"branches"')
+    if start == -1:
+        return None
+    section = output[start:]
+
+    opening = re.search(rf'"{re.escape(branch)}"\s*\{{', section)
+    if opening is None:
+        return None
+    # Bounded to this branch's own block, so a branch without a buildid returns None
+    # instead of picking up the next branch's.
+    closing = section.find("}", opening.end())
+    block = section[opening.end() : closing if closing != -1 else len(section)]
+
+    match = re.search(r'"buildid"\s+"(\d+)"', block)
+    return match.group(1) if match else None
 
 
 def _read_buildid(manifest: Path) -> str | None:
