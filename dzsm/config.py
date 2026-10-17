@@ -29,6 +29,15 @@ MAX_ROOT_PATH_LEN = 40
 # 2302 listens for RCON on 2305.
 RCON_PORT_OFFSET = 3
 
+# How many consecutive ports the game itself binds from its game port: the port, +1 for
+# Steam query, +2 for the Steam master link.
+GAME_PORT_SPAN = 3
+
+# With RCON at +3, one instance occupies four consecutive ports, so game ports have to be
+# at least this far apart. 2302 and 2402 is the conventional spacing; 2302 and 2304 is a
+# collision that looks fine in config.
+PORT_BLOCK_SIZE = RCON_PORT_OFFSET + 1
+
 
 # Characters that make a string more than a bare name: path separators (both, since a
 # config written on Windows is read on Linux and vice versa), a drive-letter colon, and
@@ -217,6 +226,19 @@ class InstanceConfig(BaseModel):
                 f"manages; a path would escape it."
             )
         return v
+
+    def claimed_ports(self) -> set[int]:
+        """Every UDP port this instance occupies.
+
+        DayZ binds the game port plus the two above it — Steam query and the Steam master
+        link — and BattlEye listens for RCON on its own. Reserving only the game port is
+        what let two instances two apart pass validation and then fight over the rest.
+        """
+        ports = {self.port + offset for offset in range(GAME_PORT_SPAN)}
+        rcon = self.resolved_rcon_port()
+        if rcon is not None:
+            ports.add(rcon)
+        return ports
 
     def resolved_rcon_port(self) -> int | None:
         """The RCON port to talk to, or None when RCON is off for this instance."""
@@ -579,14 +601,28 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _ports_are_unique(self) -> Config:
+        """No two instances may claim the same UDP port.
+
+        Comparing only the game port is not enough: DayZ binds a *block* — the game port,
+        +1 for Steam query, +2 for the Steam master link — and BattlEye adds RCON on top.
+        So instances two apart pass a naive check and then collide, which surfaces as the
+        second server failing to bind or, worse, as RCON commands reaching the wrong
+        server. Instances need to be at least four apart.
+        """
         seen: dict[int, str] = {}
         for name, instance in self.instances.items():
-            if instance.port in seen:
-                raise ValueError(
-                    f"instances {seen[instance.port]!r} and {name!r} both use port "
-                    f"{instance.port}"
-                )
-            seen[instance.port] = name
+            for port in instance.claimed_ports():
+                owner = seen.get(port)
+                if owner is not None and owner != name:
+                    raise ValueError(
+                        f"instances {owner!r} and {name!r} both claim UDP port {port}. "
+                        f"A DayZ instance uses its game port plus the two above it "
+                        f"(Steam query and master) and its BattlEye RCON port, so game "
+                        f"ports must be at least {PORT_BLOCK_SIZE} apart — "
+                        f"{owner!r} holds {sorted(self.instances[owner].claimed_ports())} "
+                        f"and {name!r} wants {sorted(instance.claimed_ports())}."
+                    )
+                seen[port] = name
         return self
 
 

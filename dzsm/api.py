@@ -116,6 +116,20 @@ class AssignMod(BaseModel):
     list_name: str = "mods"
 
 
+class NewInstance(BaseModel):
+    """A server to add to the config."""
+
+    name: str
+    # Omitted picks the next free one, spaced clear of every existing instance's block.
+    port: int | None = None
+    # Mods to load, in load order.
+    mods: list[str] = []
+    # Or take another server's load order verbatim, which is the usual reason for a
+    # second server: the same mods on a different map.
+    copy_mods_from: str | None = None
+    mission_source: str | None = None
+
+
 class ChatMessage(BaseModel):
     """Admin chat to send to a server."""
 
@@ -707,6 +721,85 @@ def create_app(config_path: Path) -> FastAPI:
         job = jobs.create("steam.verify")
         background.add_task(_run_steam_verify, config, jobs, job.id)
         return job
+
+    # Declared before the "/api/instances/{name}/..." routes. Harmless today because
+    # there is no GET for a single instance; if one is ever added, this must stay first
+    # or a server literally named "new" would shadow it.
+    @app.get("/api/instances/new")
+    def new_instance_defaults() -> dict[str, Any]:
+        """What to prefill an "add a server" form with.
+
+        The suggested port steps up from the highest existing one rather than filling the
+        lowest gap: a gap is usually deliberate, and reusing it is how a new server
+        collides with something dzsm cannot see.
+        """
+        state = current_state()
+        missions = instance_mod.shared_missions(config, state)
+        return {
+            "port": settings.suggest_port(config),
+            "mods": sorted(config.mods),
+            # Offering to copy another server's load order, because the usual reason for
+            # a second server is the same mods on a different map.
+            "instances": {
+                name: instance.mods for name, instance in config.instances.items()
+            },
+            "missions": [
+                {"name": mission, "terrain": instance_mod.mission_terrain(mission)}
+                for mission in missions
+                if not mission.startswith(f"{config.mission_prefix}_")
+            ],
+            # So the form can warn before the save rather than after it.
+            "taken_ports": sorted(
+                port
+                for instance in config.instances.values()
+                for port in instance.claimed_ports()
+            ),
+        }
+
+    @app.post("/api/instances", status_code=201, dependencies=writes)
+    def create_instance(body: NewInstance) -> dict[str, Any]:
+        """Add a server to the config.
+
+        Creates the config entry only. Its directories, mission and BattlEye config are
+        all set up at its first start, by the same code that does it for every other
+        instance — there is no separate provisioning path to drift out of sync.
+        """
+        nonlocal config
+        port = body.port if body.port is not None else settings.suggest_port(config)
+
+        mods = list(body.mods)
+        if body.copy_mods_from is not None:
+            source = config.instances.get(body.copy_mods_from)
+            if source is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"no server named {body.copy_mods_from!r} to copy mods from",
+                )
+            # Its load order, in order — the order is the load order, and copying it
+                # sorted would break every framework dependency in it.
+            mods = list(source.mods)
+
+        try:
+            document = settings.read_document(config_path)
+            settings.add_instance(
+                document,
+                body.name,
+                port=port,
+                mods=mods,
+                mission_source=body.mission_source,
+            )
+            config = settings.save(config_path, document)
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        instance = config.instances[body.name]
+        return {
+            "name": body.name,
+            "port": instance.port,
+            "rcon_port": instance.resolved_rcon_port(),
+            "mods": instance.mods,
+            "claimed_ports": sorted(instance.claimed_ports()),
+        }
 
     @app.get("/api/instances/{name}/missions")
     def instance_missions(name: str) -> dict[str, Any]:

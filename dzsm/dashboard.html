@@ -127,6 +127,12 @@ const FEED_LINES = 300;    // how much to keep in the page before trimming
 // makes the next paint re-read the resolved name from the server rather than guess it.
 const missions = {};
 
+// Defaults for the "add a server" form, and what has been typed into it. Both held
+// outside the DOM: a refused save repaints the panel, and losing a half-filled form to
+// an error message is its own small insult.
+let newServer = null;
+let pendingNewServer = {};
+
 // The map someone has picked but not yet saved, per instance. Held outside the DOM for
 // the same reason the search and chat boxes are: a repaint rebuilds the panel, and a
 // <select> rebuilt from server state loses the choice. Reading the value back out of the
@@ -275,6 +281,27 @@ const actions = {
   modsUpdate: () => post('api/mods/update', 'Mod update'),
   serverUpdate: () => post('api/server/update', 'Server app update'),
   verifySteam: () => post('api/steam/verify', 'Steam session check'),
+
+  createServer: async () => {
+    const name = val('ns-name');
+    if (!name) { say('give the server a name', true); return; }
+    const port = num('ns-port');
+    const body = {name: name, port: port, mission_source: val('ns-map') || null};
+    const copy = val('ns-copy');
+    if (copy) body.copy_mods_from = copy;
+
+    // Held outside the DOM so a refused save (name taken, port clash) does not lose
+    // what was typed when the panel repaints with the error.
+    pendingNewServer = {name: name, port: port};
+    const out = await send('POST', 'api/instances', body, 'Added server ' + name);
+    if (out) {
+      pendingNewServer = {};
+      newServer = null;              // refetch, so the next suggested port moves on
+      say('Added ' + out.name + ' on port ' + out.port
+          + ' (uses ' + out.claimed_ports.join(', ') + ')');
+      location.hash = '#/server/' + encodeURIComponent(out.name);
+    }
+  },
 
   // Live preview without a round trip: the derived name's suffix comes from the chosen
   // source, and seeing it change is what makes clear that picking a map renames the world.
@@ -672,6 +699,49 @@ function overviewRow(i) {
     + '</tr>';
 }
 
+function addServerPanel() {
+  const n = newServer;
+  if (!n) return '';
+  const d = busy ? ' disabled' : '';
+
+  const copyOptions = ['<option value="">nothing (empty load order)</option>']
+    .concat(Object.entries(n.instances).map(([name, mods]) =>
+      '<option' + attr('value', name) + '>' + esc(name) + ' &mdash; '
+      + (mods.length ? mods.length + ' mod' + (mods.length === 1 ? '' : 's') : 'no mods')
+      + '</option>'))
+    .join('');
+
+  const mapOptions = ['<option value="">leave to the default</option>']
+    .concat(n.missions.map(m =>
+      '<option' + attr('value', m.name) + '>'
+      + esc(TERRAIN_NAMES[m.terrain] || m.terrain) + ' &mdash; ' + esc(m.name)
+      + '</option>')).join('');
+
+  return '<h2>Add a server</h2><div class="panel" data-form>'
+    + '<div class="field"><label>Name</label>'
+      + '<input type="text" id="ns-name" style="width:14rem" placeholder="e.g. livonia"'
+      + attr('value', pendingNewServer.name || '') + '>'
+      + '<span class="note">letters, digits, underscore, dash &mdash; it becomes a folder '
+      + 'and part of the mission name</span></div>'
+    + '<div class="field"><label>Game port</label>'
+      + '<input type="number" id="ns-port" style="width:7rem"'
+      + attr('value', pendingNewServer.port || n.port) + '>'
+      + '<span class="note">uses this and the three above it (query, master, RCON)'
+      + (n.taken_ports.length ? ' &mdash; taken: ' + n.taken_ports.join(', ') : '')
+      + '</span></div>'
+    + '<div class="field"><label>Copy mods from</label>'
+      + '<select id="ns-copy">' + copyOptions + '</select>'
+      + '<span class="note">load order is copied in order, which is what matters</span></div>'
+    + '<div class="field"><label>Map</label><select id="ns-map">' + mapOptions + '</select>'
+      + (n.missions.length ? '' : '<span class="note">no server app downloaded yet</span>')
+      + '</div>'
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="createServer"' + d + '>Add server</button>'
+      + '<span class="note">adds it to the config; its folders and mission are created at '
+      + 'its first start</span></div>'
+    + '</div>';
+}
+
 function renderOverview() {
   const d = busy ? ' disabled' : '';
   let h = '<div class="bar">'
@@ -687,7 +757,7 @@ function renderOverview() {
   if (!last.instances.length) h += '<tr><td colspan="6">none configured</tr>';
   h += '</table>';
 
-  h += steamPanel() + managerPanel();
+  h += addServerPanel() + steamPanel() + managerPanel();
 
   h += '<h2>Server app</h2>' + gameUpdateBanner() + '<table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
@@ -1476,6 +1546,13 @@ async function load() {
     // connect and RCON login per instance every four seconds, which is a lot of traffic
     // to learn a number that barely moves.
     const view = route();
+
+    // Fetched once, and dropped after a server is added so the suggested port moves on.
+    if (view.page === 'overview' && newServer === null) {
+      const defaults = await get('api/instances/new');
+      if (defaults) newServer = defaults;
+    }
+
     if (view.page === 'server') {
       const instance = (inst || []).find(x => x.name === view.name);
       const last_fetch = livePlayersAt[view.name] || 0;
@@ -1531,7 +1608,7 @@ async function load() {
     // that half an hour later.
     const snapshot = JSON.stringify(
       [last, jobs, busy, location.hash, cfgEditing, assigning, unauthorized, livePlayers,
-       feeds, missions,
+       feeds, missions, newServer,
        ago(last.updates && last.updates.last_checked),
        ago(last.steam && last.steam.checked_at),
        // The restart countdown is rendered text, not data: the deadline itself does not
@@ -1562,6 +1639,8 @@ document.addEventListener('input', e => {
   if (e.target.id === 'q') pendingQuery = e.target.value;
   if (e.target.id === 'lp') localPath = e.target.value;
   if (e.target.id === 'chat') pendingChat = e.target.value;
+  if (e.target.id === 'ns-name') pendingNewServer.name = e.target.value;
+  if (e.target.id === 'ns-port') pendingNewServer.port = e.target.value;
 });
 
 render();

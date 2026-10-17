@@ -32,6 +32,12 @@ from tomlkit import TOMLDocument
 
 from dzsm.config import Config, ConfigError
 
+# Where a first instance starts, and how far apart to space new ones. Four is the minimum
+# that avoids a collision; 100 is the conventional spacing and leaves room to add a few
+# ports to an instance later without reshuffling everything after it.
+DEFAULT_GAME_PORT = 2302
+PORT_SPACING = 100
+
 _log = logging.getLogger(__name__)
 
 BACKUP_SUFFIX = ".bak"
@@ -287,19 +293,23 @@ def add_local_mod(document: TOMLDocument, name: str, path: Path) -> TOMLDocument
     return document
 
 
-def _new_mod_table() -> Any:
+def _new_table(label: str) -> Any:
     """A table that will read correctly wherever tomlkit decides to put it.
 
-    tomlkit appends a new sub-table at the end of the `mods` super-table's rendered span,
-    which in a commented config lands *after* whatever section comments follow the last
-    mod — so the new entry can appear to be what a comment above it describes. It cannot
-    be repositioned (a dotted-key table append is refused outright), so instead the table
+    tomlkit appends a new sub-table at the end of its super-table's rendered span, which
+    in a commented config lands *after* whatever section comments follow the last entry —
+    so the new entry can appear to be what a comment above it describes. It cannot be
+    repositioned (a dotted-key table append is refused outright), so instead the table
     labels itself and is separated by blank lines on both sides.
     """
     table = tomlkit.table()
     table.trivia.indent = "\n"
-    table.comment("added by dzsm")
+    table.comment(label)
     return table
+
+
+def _new_mod_table() -> Any:
+    return _new_table("added by dzsm")
 
 
 def local_mod_name(directory: Path, existing: Collection[str]) -> str:
@@ -400,6 +410,90 @@ def _drop(table: Any, list_name: str, mod_name: str) -> None:
         return
     while mod_name in list(array):
         array.remove(mod_name)
+
+
+INSTANCE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def instance_name_error(name: str) -> str | None:
+    """Why this name cannot be an instance, or None if it can.
+
+    Stricter than a TOML key needs to be, because the name is not just a label: it becomes
+    a directory under `instances/`, and it goes inside the derived mission name, where a
+    dot would break DayZ's "<MissionName>.<TerrainName>" parsing and a space would break
+    the launch arguments.
+    """
+    if not name:
+        return "a server needs a name"
+    if not INSTANCE_NAME_PATTERN.match(name):
+        return (
+            f"{name!r} cannot be used: a server name may contain only letters, digits, "
+            f"underscore and dash. It becomes a folder under instances/ and part of the "
+            f"mission name, where anything else breaks."
+        )
+    return None
+
+
+def suggest_port(config: Config) -> int:
+    """A free game port for a new instance.
+
+    Steps up from the highest existing port rather than filling the lowest gap: a gap is
+    usually deliberate — leaving 2302 alone because something else on the box already
+    uses it, say — and quietly reusing it is how a new server collides with a thing dzsm
+    cannot see.
+    """
+    if not config.instances:
+        return DEFAULT_GAME_PORT
+    highest = max(instance.port for instance in config.instances.values())
+    return highest + PORT_SPACING
+
+
+def add_instance(
+    document: TOMLDocument,
+    name: str,
+    *,
+    port: int,
+    mods: Collection[str] = (),
+    mission_source: str | None = None,
+) -> TOMLDocument:
+    """Add an `[instances.<name>]` table.
+
+    Deliberately minimal: a port, a load order, and optionally which map to seed from.
+    Everything else has a default that works, and a new instance littered with explicit
+    copies of every default is harder to read and freezes those defaults forever.
+    """
+    problem = instance_name_error(name)
+    if problem is not None:
+        raise SettingsError(problem)
+
+    instances = document.setdefault("instances", tomlkit.table(is_super_table=True))
+    if name in instances:
+        raise SettingsError(f"a server named {name!r} already exists")
+
+    known = set(document.get("mods") or {})
+    unknown = sorted(set(mods) - known)
+    if unknown:
+        raise SettingsError(
+            f"unknown mod(s): {', '.join(unknown)}. Configure them first; known: "
+            f"{', '.join(sorted(known)) or 'none'}"
+        )
+
+    # Same positioning problem as a new [mods.X]: tomlkit appends it at the end of the
+    # super-table's rendered span, which in a commented config lands after whatever
+    # section comments follow the last instance. So it labels itself.
+    entry = _new_table("added by dzsm")
+    entry["port"] = port
+    # An array even when empty, so the load order is visibly a list to edit rather than a
+    # key someone has to know to add.
+    array = tomlkit.array()
+    for mod_name in mods:
+        array.append(mod_name)
+    entry["mods"] = array
+    if mission_source is not None:
+        entry["mission_source"] = mission_source
+    entry.add(tomlkit.nl())
+    instances[name] = entry
+    return document
 
 
 def set_instance_mod(

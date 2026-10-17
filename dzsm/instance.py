@@ -397,6 +397,25 @@ def effective_server_dir(config: Config, state: State, instance_name: str) -> Pa
     return source
 
 
+def shared_missions(config: Config, state: State) -> list[str]:
+    """Missions in the build every instance shares, with no instance in hand.
+
+    For a server that does not exist yet: it has no build pin and no isolated copy, so it
+    will read from whichever build is newest. Returns a list, empty when nothing is
+    installed — never None (Rule 1).
+    """
+    if state.serverapp_version is not None:
+        server_dir = config.serverapp_dir / state.serverapp_version
+    elif config.server_app_path is not None:
+        server_dir = config.server_app_path
+    else:
+        return []
+    missions = server_dir / "mpmissions"
+    if not missions.is_dir():
+        return []
+    return sorted(p.name for p in missions.iterdir() if p.is_dir())
+
+
 def mission_terrain(mission: str) -> str:
     """The terrain a mission name selects.
 
