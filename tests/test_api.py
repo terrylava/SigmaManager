@@ -128,6 +128,7 @@ def test_reads_are_open_even_when_a_token_is_set(secured: TestClient) -> None:
         ("post", "/api/instances/chernarus/start"),
         ("post", "/api/instances/chernarus/stop"),
         ("post", "/api/instances/chernarus/restart"),
+        ("patch", "/api/instances/chernarus/settings"),
         ("post", "/api/mods/check"),
         ("post", "/api/mods/update"),
         ("post", "/api/server/update"),

@@ -59,7 +59,8 @@ def _add(path: Path, name: str, **kwargs: object) -> object:
 
 
 def test_an_instance_claims_four_ports(config_file: Path) -> None:
-    """Game port, +1 Steam query, +2 Steam master, and BattlEye RCON at +3."""
+    """The game binds a three-wide span, BattlEye RCON sits at +3, and the Steam query
+    port goes at +1 — which the game leaves free. See tests/test_query_port.py."""
     config = load_config(config_file)
 
     assert config.instances["chernarus"].claimed_ports() == {2402, 2403, 2404, 2405}

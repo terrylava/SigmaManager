@@ -385,6 +385,14 @@ const actions = {
                patch, 'Settings for ' + d.name + ' saved');
   },
 
+  savePorts: async d => {
+    await send('PATCH', 'api/instances/' + encodeURIComponent(d.name) + '/settings',
+               // null removes the key, which is what an emptied box means: go back to
+               // deriving it from the game port.
+               {steam_query_port: num('f-queryport')},
+               'Ports for ' + d.name + ' saved');
+  },
+
   editCfg: async d => {
     if (cfgEditing === d.name) { closeCfg(); painted = ''; render(); return; }
     try {
@@ -841,6 +849,35 @@ function launchPanel(i) {
     + '</div>';
 }
 
+function portsPanel(i) {
+  // The whole block, not just the editable field: the point of pinning a query port is
+  // that the layout is predictable, and that is only visible when it is all laid out.
+  const derived = i.port + 1;
+  return '<h2>Ports</h2><div class="panel" data-form>'
+    + '<div class="field"><label>Game</label><code>' + i.port + '</code>'
+      + '<span class="note">set by <code>port</code>; the rest follow it</span></div>'
+    + '<div class="field"><label>Steam query</label>'
+      + '<input type="number" id="f-queryport" min="1" max="65535" style="width:6rem"'
+      + attr('value', i.steam_query_port_pin == null ? '' : i.steam_query_port_pin)
+      + attr('placeholder', derived) + '>'
+      + '<span class="note">blank = ' + derived + ' (game port +1). This is the port the '
+      + 'in-game browser and DZSA find the server on</span></div>'
+    + '<div class="field"><label>BattlEye RCON</label>'
+      + '<code>' + (i.rcon_port ? i.rcon_port : 'off') + '</code>'
+      + '<span class="note">game port +3 unless <code>rcon_port</code> says otherwise'
+      + '</span></div>'
+    + '<div class="field"><label>&nbsp;</label>'
+      + '<button class="primary" data-act="savePorts"' + attr('data-name', i.name)
+      + (busy ? ' disabled' : '') + '>Save</button>'
+      + '<span class="note">applies at the next start</span></div>'
+    + '<p class="note">Left to itself the engine hands out query ports in start order '
+      + '&mdash; 27016 to whichever server came up first, 27017 to the next &mdash; so '
+      + 'restarting in a different order swaps them, and saved favourites and firewall '
+      + 'rules follow the wrong server. dzsm writes this one into the generated '
+      + '<code>serverDZ.active.cfg</code> at every start so it stays put.</p>'
+    + '</div>';
+}
+
 function cfgPanel(name) {
   return '<div class="panel" data-form>'
     + '<h3>serverDZ.cfg &mdash; <span class="note">' + esc(cfgPath) + '</span></h3>'
@@ -1070,6 +1107,7 @@ function renderServer(name) {
 
   let h = '<div class="head"><h2>' + esc(i.name) + '</h2>' + state
     + '<span class="note">port ' + i.port
+    + ' &middot; query ' + i.steam_query_port
     + (i.rcon_port ? ' &middot; rcon ' + i.rcon_port : '')
     + (i.server_build ? ' &middot; build ' + esc(i.server_build) : '')
     + (i.isolated_server ? ' &middot; isolated' : '') + '</span>'
@@ -1090,6 +1128,7 @@ function renderServer(name) {
   h += playersPanel(i);
   h += feedPanel(i);
   h += missionPanel(i);
+  h += portsPanel(i);
   h += launchPanel(i);
   h += instanceModsPanel(i);
   return h;

@@ -29,9 +29,30 @@ MAX_ROOT_PATH_LEN = 40
 # 2302 listens for RCON on 2305.
 RCON_PORT_OFFSET = 3
 
-# How many consecutive ports the game itself binds from its game port: the port, +1 for
-# Steam query, +2 for the Steam master link.
+# How many consecutive ports the game itself binds from its game port. Measured on DayZ
+# 1.29 with netstat against two servers side by side: `-port=2402` binds 2402, 2404 and
+# 2405 (2405 being BattlEye's RCON), and `-port=2502` binds 2502, 2504, 2505. So the game
+# occupies a three-wide span, +1 is *not* bound by default, and the Steam query port is
+# nowhere in the block — it defaults to 27016 and the next server on the box steps to
+# 27017, assigned in start order rather than derived from the game port.
+#
+# A four-wide block is still reserved per instance: RCON genuinely sits at +3, and +1 is
+# where dzsm puts the Steam query port (see STEAM_QUERY_PORT_OFFSET) precisely because
+# the game leaves it free.
 GAME_PORT_SPAN = 3
+
+# Where dzsm pins the Steam query port, relative to the game port. The engine's own
+# default is allocation-order dependent (27016 for the first server to start, 27017 for
+# the next), which means restarting instances in a different order swaps their query
+# ports — and both the in-game server browser and DZSA list servers *by* query port, so
+# firewall rules and players' saved favourites follow whichever server started first.
+#
+# +1 is chosen because the game does not bind it, dzsm already reserves it as part of the
+# four-wide block, and the existing collision check therefore covers it for free. It also
+# collapses an instance to one contiguous range, so "open 2402-2405" is the whole
+# firewall rule. Confirmed live: `steamQueryPort = 2403;` on a 2402 server bound 2403 and
+# dropped 27016 entirely.
+STEAM_QUERY_PORT_OFFSET = 1
 
 # With RCON at +3, one instance occupies four consecutive ports, so game ports have to be
 # at least this far apart. 2302 and 2402 is the conventional spacing; 2302 and 2304 is a
@@ -187,6 +208,23 @@ class InstanceConfig(BaseModel):
     # Server-only mods, emitted as -serverMod=. Clients never load these, so they are
     # for things like admin tools and server-side logic. Same ordering rule applies.
     server_mods: list[str] = Field(default_factory=list)
+    # Steam query port: the one the in-game server browser and DZSA find this server on.
+    # None derives it as port + STEAM_QUERY_PORT_OFFSET.
+    #
+    # It lives here rather than being read out of the instance's serverDZ.cfg because
+    # config load is pure — it never opens an instance file — and that matters: a config
+    # is loaded by `dzsm init` and by the web UI's add-server flow before any instance
+    # directory exists, so a serverDZ.cfg-sourced value would be *unknown* exactly when a
+    # new instance's port is being chosen, and the collision check below would silently
+    # weaken to "whatever we could read". Keeping it in config.toml gives one source of
+    # truth that validation can always see.
+    #
+    # The cost is that dzsm now owns a second serverDZ.cfg key besides `template`. That
+    # is acceptable here, and only here, because the write lands in the *generated*
+    # `serverDZ.active.cfg` — the file whose header already says dzsm rewrites it at every
+    # start — and never in the serverDZ.cfg people edit. So nothing in the user's file is
+    # overwritten; the key is injected into a copy the engine alone reads.
+    steam_query_port: int | None = None
     # BattlEye RCON port. None derives it as port + RCON_PORT_OFFSET, the usual DayZ
     # layout — a 2302 server has RCON on 2305. Set it explicitly when the instance's
     # BEServer config says otherwise.
@@ -230,15 +268,46 @@ class InstanceConfig(BaseModel):
     def claimed_ports(self) -> set[int]:
         """Every UDP port this instance occupies.
 
-        DayZ binds the game port plus the two above it — Steam query and the Steam master
-        link — and BattlEye listens for RCON on its own. Reserving only the game port is
-        what let two instances two apart pass validation and then fight over the rest.
+        DayZ binds a three-wide span from the game port, BattlEye listens for RCON on its
+        own, and the Steam query port is a fourth — which by default sits in the span the
+        game leaves free, but can be pinned anywhere. Reserving only the game port is what
+        let two instances two apart pass validation and then fight over the rest.
         """
         ports = {self.port + offset for offset in range(GAME_PORT_SPAN)}
+        ports.add(self.resolved_steam_query_port())
         rcon = self.resolved_rcon_port()
         if rcon is not None:
             ports.add(rcon)
         return ports
+
+    def port_role(self, port: int) -> str:
+        """What this instance uses `port` for, for a collision message.
+
+        A port can serve two roles at once — the default query port is also the game
+        port's +1 — so every match is reported rather than the first, which is what makes
+        "wants it as its Steam query port" readable instead of misleading.
+        """
+        roles: list[str] = []
+        if port == self.port:
+            roles.append("game port")
+        if port == self.resolved_steam_query_port():
+            roles.append("Steam query port")
+        if port == self.resolved_rcon_port():
+            roles.append("BattlEye RCON port")
+        if not roles and self.port < port < self.port + GAME_PORT_SPAN:
+            roles.append(f"game port +{port - self.port}")
+        return " and ".join(roles) if roles else f"reserved port (game port {self.port})"
+
+    def resolved_steam_query_port(self) -> int:
+        """The port the server browser will find this instance on.
+
+        Always a number: there is no "off" for this one. The engine binds a query port
+        whatever happens, and leaving it to the engine is what makes it allocation-order
+        dependent — so dzsm always has an answer, and always writes it out.
+        """
+        if self.steam_query_port is not None:
+            return self.steam_query_port
+        return self.port + STEAM_QUERY_PORT_OFFSET
 
     def resolved_rcon_port(self) -> int | None:
         """The RCON port to talk to, or None when RCON is off for this instance."""
@@ -603,24 +672,31 @@ class Config(BaseModel):
     def _ports_are_unique(self) -> Config:
         """No two instances may claim the same UDP port.
 
-        Comparing only the game port is not enough: DayZ binds a *block* — the game port,
-        +1 for Steam query, +2 for the Steam master link — and BattlEye adds RCON on top.
-        So instances two apart pass a naive check and then collide, which surfaces as the
-        second server failing to bind or, worse, as RCON commands reaching the wrong
-        server. Instances need to be at least four apart.
+        Comparing only the game port is not enough: DayZ binds a three-wide span from it,
+        BattlEye adds RCON at +3, and the Steam query port is a fourth. So instances two
+        apart pass a naive check and then collide, which surfaces as the second server
+        failing to bind or, worse, as RCON commands reaching the wrong server. Instances
+        need to be at least four apart.
+
+        An explicitly pinned `steam_query_port` is checked against every other instance's
+        whole block too, so moving one query port cannot land it on another server's game,
+        master or RCON port.
         """
         seen: dict[int, str] = {}
         for name, instance in self.instances.items():
-            for port in instance.claimed_ports():
+            for port in sorted(instance.claimed_ports()):
                 owner = seen.get(port)
                 if owner is not None and owner != name:
+                    other = self.instances[owner]
                     raise ValueError(
-                        f"instances {owner!r} and {name!r} both claim UDP port {port}. "
-                        f"A DayZ instance uses its game port plus the two above it "
-                        f"(Steam query and master) and its BattlEye RCON port, so game "
-                        f"ports must be at least {PORT_BLOCK_SIZE} apart — "
-                        f"{owner!r} holds {sorted(self.instances[owner].claimed_ports())} "
-                        f"and {name!r} wants {sorted(instance.claimed_ports())}."
+                        f"instances {owner!r} and {name!r} both claim UDP port {port}: "
+                        f"{owner!r} uses it as its {other.port_role(port)} and {name!r} "
+                        f"wants it as its {instance.port_role(port)}. A DayZ instance "
+                        f"occupies its game port, the two above it, its Steam query port "
+                        f"and its BattlEye RCON port, so game ports must be at least "
+                        f"{PORT_BLOCK_SIZE} apart — {owner!r} holds "
+                        f"{sorted(other.claimed_ports())} and {name!r} wants "
+                        f"{sorted(instance.claimed_ports())}."
                     )
                 seen[port] = name
         return self

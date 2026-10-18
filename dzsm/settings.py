@@ -65,6 +65,7 @@ EDITABLE_INSTANCE_FIELDS = frozenset(
         "isolated_server",
         "mission",
         "mission_source",
+        "steam_query_port",
         "rcon_port",
         "rcon_enabled",
         "rcon_live",

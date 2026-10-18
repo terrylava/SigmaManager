@@ -168,6 +168,43 @@ the client acks and keeps waiting rather than treating one as the answer.
 RCON is **on by default** on `port + 3` (a 2302 server → 2305, the stock DayZ layout).
 `rcon_port` overrides, `rcon_enabled = false` opts out.
 
+**The measured UDP port layout** (DayZ 1.29, netstat against two servers side by side —
+this is the record, since the hosting guides online disagree and are wrong):
+
+| `-port=` | binds |
+|---|---|
+| 2402 | 2402, 2404, 2405 (BattlEye RCON), 27016 (Steam query) |
+| 2502 | 2502, 2504, 2505 (BattlEye RCON), 27017 (Steam query) |
+
+So the game binds a **three-wide** span, **`port + 1` is never bound**, and the Steam
+query port is **not** `port + 1` — it defaults to 27016 and the next server on the box
+steps to 27017, **assigned in start order**. An earlier comment in `config.py` claimed
++1 was Steam query and +2 the Steam master link; the +1 half of that was invented.
+
+That start-order default is a real problem, not a curiosity: the in-game server browser
+and DZSA list servers **by query port**, so restarting instances in a different order
+swaps their query ports and players' saved favourites and the firewall rules follow
+whichever server came up first. So dzsm pins it.
+
+**`steam_query_port` defaults to `port + 1`** — the slot the game leaves free, which the
+four-wide block already reserves, so the existing collision check covers it for nothing
+and an instance collapses to one contiguous range (`2402-2405` is the whole firewall
+rule). `steamQueryPort = 2403;` on a 2402 server was confirmed live: it bound 2403 and
+dropped 27016 entirely.
+
+It lives in config.toml rather than being read back out of serverDZ.cfg because **config
+load is pure** — it never opens an instance file. A config is loaded by `dzsm init` and
+by the add-server flow *before* any instance directory exists, so a serverDZ.cfg-sourced
+value would be unknown exactly when a new instance's port is being picked, and the
+collision check would quietly weaken to "whatever we could read".
+
+This makes `steamQueryPort` **the second serverDZ.cfg key dzsm owns**, after `template`,
+and it is the only one written *without* also writing the file people edit: the
+substitution happens on the in-memory copy on its way to `serverDZ.active.cfg`. A value
+already in the editable file is logged and then overridden, because config.toml is the
+value validation can see — deferring to the file would let two instances share a query
+port that config load swore was unique.
+
 **BattlEye ships no config**, so dzsm writes one before launch with a `secrets`-generated
 password, and reads it back from there — no env var needed, though one still overrides.
 There is deliberately no default password; a shared one is worse than none.

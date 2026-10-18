@@ -645,6 +645,11 @@ def create_app(config_path: Path) -> FastAPI:
                     "pins": state.pins.get(name, {}),
                     "rcon_port": instance.resolved_rcon_port(),
                     "rcon_live": instance.rcon_live,
+                    # Both: the resolved port is what the server browser will use, and
+                    # the raw field is what the form has to show, since "derived" and
+                    # "pinned to the same number by hand" are different states to edit.
+                    "steam_query_port": instance.resolved_steam_query_port(),
+                    "steam_query_port_pin": instance.steam_query_port,
                     "cpu_affinity": instance.cpu_affinity,
                     "priority": instance.priority,
                     "cpu_count": instance.cpu_count,
@@ -797,6 +802,7 @@ def create_app(config_path: Path) -> FastAPI:
             "name": body.name,
             "port": instance.port,
             "rcon_port": instance.resolved_rcon_port(),
+            "steam_query_port": instance.resolved_steam_query_port(),
             "mods": instance.mods,
             "claimed_ports": sorted(instance.claimed_ports()),
         }

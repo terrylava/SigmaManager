@@ -728,8 +728,46 @@ def prepare_server_config(config: Config, instance_name: str) -> Path:
     # prepending the header would then bury it mid-file, where it corrupts the first real
     # setting and the engine exits on startup with nothing useful in the RPT.
     body = source.read_text(encoding="utf-8-sig", errors="replace")
+    body = _apply_steam_query_port(config, instance_name, body)
     active.write_text(header + body, encoding="utf-8")
     return active
+
+
+QUERY_PORT_PATTERN = re.compile(r"^(\s*steamQueryPort\s*=\s*)(\d+)", re.MULTILINE)
+
+
+def _apply_steam_query_port(config: Config, instance_name: str, body: str) -> str:
+    """Pin `steamQueryPort` in the generated config to what dzsm resolved.
+
+    The engine's own default is allocation-order dependent — 27016 for the first server to
+    start, 27017 for the next — so two instances swap query ports simply by restarting in
+    a different order, and both the server browser and DZSA list servers *by* query port.
+    Writing it makes it a property of the instance instead of a property of boot order.
+
+    This is the second serverDZ.cfg key dzsm owns, after `template`, and the only one it
+    writes *without* also writing it into the file people edit: the substitution happens
+    on the in-memory copy on its way to serverDZ.active.cfg, so the editable serverDZ.cfg
+    is untouched. A value already in that file is reported and then overridden, because
+    config.toml is what validation can see and therefore what has to win — silently
+    deferring to the file would let two instances share a query port that config load
+    swore was unique.
+    """
+    wanted = config.instances[instance_name].resolved_steam_query_port()
+    existing = QUERY_PORT_PATTERN.search(body)
+    if existing is None:
+        return body.rstrip("\n") + f"\nsteamQueryPort = {wanted};\n"
+    if existing.group(2) != str(wanted):
+        _log.warning(
+            "instance %s: %s sets steamQueryPort = %s, but config.toml resolves it to "
+            "%d; using %d. Set `steam_query_port` on the instance to change it — the "
+            "value in config.toml is the one port validation can check.",
+            instance_name,
+            config.instances[instance_name].config_file,
+            existing.group(2),
+            wanted,
+            wanted,
+        )
+    return QUERY_PORT_PATTERN.sub(rf"\g<1>{wanted}", body, count=1)
 
 
 def sync_keys(server_dir: Path, instance_name: str, paths: list[Path]) -> list[Path]:

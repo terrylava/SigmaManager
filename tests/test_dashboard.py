@@ -146,6 +146,8 @@ def test_the_page_carries_the_fields_it_renders(client: TestClient) -> None:
 
     assert "held" in instance
     assert "rcon_port" in instance
+    assert "steam_query_port" in instance
+    assert "steam_query_port_pin" in instance
     assert "pins" in instance
     assert "next_restart" in instance
 
