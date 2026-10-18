@@ -1710,6 +1710,15 @@ def create_app(config_path: Path) -> FastAPI:
         The previous version is kept alongside it.
         """
         _known_instance(config, name)
+        if not body.text.strip():
+            # Nobody means this. An empty serverDZ.cfg is a server with no hostname, no
+            # mission template and no admin password, and it is also what a UI bug that
+            # loses the editor's contents would send.
+            raise HTTPException(
+                status_code=422,
+                detail="refusing to write an empty serverDZ.cfg - delete the file instead "
+                "if you want it reseeded at the next start",
+            )
         path = config.instance_dir(name) / config.instances[name].config_file
         path.parent.mkdir(parents=True, exist_ok=True)
         try:

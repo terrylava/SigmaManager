@@ -206,7 +206,7 @@ function route() {
 }
 
 window.addEventListener('hashchange', () => {
-  cfgEditing = null; assigning = null; dirty = false; painted = ''; render();
+  closeCfg(); assigning = null; dirty = false; painted = ''; render();
 });
 
 function navBar(view) {
@@ -386,23 +386,28 @@ const actions = {
   },
 
   editCfg: async d => {
-    if (cfgEditing === d.name) { cfgEditing = null; painted = ''; render(); return; }
+    if (cfgEditing === d.name) { closeCfg(); painted = ''; render(); return; }
     try {
       const r = await fetch('api/instances/' + encodeURIComponent(d.name) + '/serverdz',
                             {headers: headers()});
       const out = await r.json();
       if (!r.ok) { say(out.detail || 'could not read serverDZ.cfg', true); return; }
-      cfgEditing = d.name; painted = ''; render();
-      document.getElementById('cfgtext').value = out.text;
-      document.getElementById('cfgpath').textContent = out.path;
+      // Held outside the DOM, then rendered. Assigning .value after render() put the
+      // text somewhere the next repaint threw away.
+      cfgEditing = d.name; cfgText = out.text; cfgPath = out.path;
+      painted = ''; render();
     } catch (e) { say('could not read serverDZ.cfg: ' + e, true); }
   },
 
   saveCfg: async d => {
-    const text = document.getElementById('cfgtext').value;
+    // cfgText is the record of what was typed, not the box: a save that read an emptied
+    // box would write that emptiness over the file.
+    const el = document.getElementById('cfgtext');
+    const text = el ? el.value : cfgText;
+    if (text === null) { say('nothing to save - reopen the editor', true); return; }
     if (await send('PUT', 'api/instances/' + encodeURIComponent(d.name) + '/serverdz',
                    {text: text}, 'serverDZ.cfg for ' + d.name + ' saved')) {
-      cfgEditing = null;
+      closeCfg();
     }
   },
 
@@ -773,7 +778,15 @@ function renderOverview() {
 
 // --- one server ----------------------------------------------------------------
 
+// The editor's text lives here, not only in the textarea. It used to be written into
+// the box with .value straight after render(), and the next repaint rebuilt the panel
+// empty - the file appeared and then vanished four seconds later. Same lesson as
+// pendingMission: anything that has to survive a repaint is held outside the DOM.
 let cfgEditing = null;
+let cfgText = null;
+let cfgPath = '';
+
+function closeCfg() { cfgEditing = null; cfgText = null; cfgPath = ''; }
 
 function launchPanel(i) {
   const cores = [];
@@ -830,8 +843,11 @@ function launchPanel(i) {
 
 function cfgPanel(name) {
   return '<div class="panel" data-form>'
-    + '<h3>serverDZ.cfg &mdash; <span class="note" id="cfgpath"></span></h3>'
-    + '<textarea id="cfgtext" spellcheck="false"></textarea>'
+    + '<h3>serverDZ.cfg &mdash; <span class="note">' + esc(cfgPath) + '</span></h3>'
+    // The leading newline is deliberate: an HTML parser drops the first newline after a
+    // textarea's open tag, so a file starting with a blank line would lose it.
+    + '<textarea id="cfgtext" spellcheck="false">\n'
+      + esc(cfgText === null ? '' : cfgText) + '</textarea>'
     + '<div class="field" style="margin-top:.6rem"><label>&nbsp;</label>'
       + '<button class="primary" data-act="saveCfg"' + attr('data-name', name) + '>Save</button>'
       + '<button data-act="editCfg"' + attr('data-name', name) + '>Cancel</button>'
@@ -1639,6 +1655,7 @@ document.addEventListener('input', e => {
   if (e.target.id === 'q') pendingQuery = e.target.value;
   if (e.target.id === 'lp') localPath = e.target.value;
   if (e.target.id === 'chat') pendingChat = e.target.value;
+  if (e.target.id === 'cfgtext') cfgText = e.target.value;
   if (e.target.id === 'ns-name') pendingNewServer.name = e.target.value;
   if (e.target.id === 'ns-port') pendingNewServer.port = e.target.value;
 });
