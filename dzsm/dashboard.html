@@ -849,6 +849,23 @@ function launchPanel(i) {
     + '</div>';
 }
 
+// The vanilla launcher only lists servers whose query port is in Steam's classic range.
+// A warning rather than a refusal, and the default is deliberately left outside it:
+// consecutive ports are what most servers run, and most players arrive through DZSA,
+// which finds a server wherever its query port is.
+const VANILLA_QUERY_RANGE = [27015, 27019];
+
+function launcherNote(port) {
+  const low = VANILLA_QUERY_RANGE[0], high = VANILLA_QUERY_RANGE[1];
+  if (port >= low && port <= high) {
+    return '<span class="note">inside ' + low + '-' + high + ', so the vanilla launcher '
+      + 'lists this server</span>';
+  }
+  return '<span class="warn">' + esc(port) + ' is outside ' + low + '-' + high + '</span>'
+    + '<span class="note">vanilla launcher only shows servers with the query port set to '
+    + low + '-' + high + '. DZSA and a direct connect find it either way.</span>';
+}
+
 function portsPanel(i) {
   // The whole block, not just the editable field: the point of pinning a query port is
   // that the layout is predictable, and that is only visible when it is all laid out.
@@ -863,8 +880,7 @@ function portsPanel(i) {
       + '<span class="note">blank = ' + derived + ' (game port +1). This is the port the '
       + 'in-game browser and DZSA find the server on</span></div>'
     + '<div class="field"><label>&nbsp;</label>'
-      + '<span class="note" style="color:#f0b429">vanilla launcher only shows servers '
-      + 'with the query port set to 27015-27019</span></div>'
+      + launcherNote(i.steam_query_port) + '</div>'
     + '<div class="field"><label>BattlEye RCON</label>'
       + '<code>' + (i.rcon_port ? i.rcon_port : 'off') + '</code>'
       + '<span class="note">game port +3 unless <code>rcon_port</code> says otherwise'

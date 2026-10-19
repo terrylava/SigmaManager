@@ -238,3 +238,13 @@ def test_the_page_renders_every_editable_setting() -> None:
               "api.port", "rcon.host", "rcon.timeout_seconds"}
 
     assert settings.EDITABLE_GLOBAL_FIELDS - rendered == hidden
+
+
+def test_the_ports_panel_checks_the_launcher_range() -> None:
+    """The default query port (game port +1) is outside 27015-27019 on purpose, so the
+    page has to say so rather than leaving a server quietly missing from the vanilla
+    launcher. Structural, not cosmetic: the panel must consult the resolved port."""
+    code = _without_comments(_dashboard_html())
+
+    assert "const VANILLA_QUERY_RANGE = [27015, 27019];" in code
+    assert "launcherNote(i.steam_query_port)" in code
