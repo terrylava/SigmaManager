@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from dzsm import settings
 from dzsm.api import _dashboard_html, create_app
 from dzsm.config import Config
 from dzsm.state import State, save_state
@@ -193,3 +194,47 @@ def test_the_page_has_no_inline_event_handlers(client: TestClient) -> None:
     assert not re.search(r"\bon(click|change|input|keydown)\s*=", code), (
         "inline event handler in dashboard.html; use data-act/data-change/data-enter"
     )
+
+
+GLOBAL_FIELD_KEY = re.compile(r"\{k: '([a-z_.]+)', t: '(num|bool|text)'")
+
+
+def _global_fields() -> list[tuple[str, str]]:
+    """The manager-settings fields the page renders, as (key, type)."""
+    block = _dashboard_html().split("const GLOBAL_FIELDS = [")[1].split("\n];")[0]
+    return GLOBAL_FIELD_KEY.findall(block)
+
+
+def test_every_manager_setting_on_the_page_is_editable() -> None:
+    """A field the page renders but the server refuses breaks the *whole* panel, not
+    just itself.
+
+    Save sends only what changed — but a key missing from EDITABLE_GLOBAL_FIELDS is
+    missing from global_values too, so it renders blank or unticked, never equals the
+    value it is compared against, and is therefore in every patch. One absent key means
+    every Save is rejected, whatever the person actually edited. That shipped: three
+    game-update fields were on the page and not in the set, so the panel could not save
+    at all.
+    """
+    missing = {key for key, _ in _global_fields()} - settings.EDITABLE_GLOBAL_FIELDS
+
+    assert not missing, f"rendered but not editable, so every Save is refused: {missing}"
+
+
+def test_every_manager_setting_is_reported_back(config: Config) -> None:
+    """The other direction: a value the page cannot read renders as a blank box, which
+    then looks like an instruction to clear the setting."""
+    values = settings.global_values(config)
+
+    assert {key for key, _ in _global_fields()} <= set(values)
+
+
+def test_the_page_renders_every_editable_setting() -> None:
+    """The reverse gap is milder but still a dead end: a setting the API accepts and
+    nothing on the page exposes can only be changed by hand in config.toml."""
+    rendered = {key for key, _ in _global_fields()}
+    # Deliberately not on the page: root-adjacent plumbing nobody should click.
+    hidden = {"allow_long_root", "snapshot_strategy", "server_appid", "api.host",
+              "api.port", "rcon.host", "rcon.timeout_seconds"}
+
+    assert settings.EDITABLE_GLOBAL_FIELDS - rendered == hidden
