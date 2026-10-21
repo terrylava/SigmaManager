@@ -28,6 +28,7 @@ from dzsm.instance import (
     COMMAND_LINE_LIMIT,
     battleye_config_path,
     build_launch_args,
+    carry_keys_forward,
     command_line_length,
     ensure_battleye_config,
     ensure_layout,
@@ -99,6 +100,9 @@ def start(
     # Keys for both lists. A server-only mod's key is not strictly needed — clients never
     # load it — but omitting it would kick any player who happens to have that mod
     # enabled, and keys are tiny. Matches how admins populate the directory by hand.
+    # Before this instance's own keys: a server update starts the new build with an
+    # empty keys/, and only the mods of instances started afterwards would come back.
+    carry_keys_forward(config, server_dir)
     sync_keys(server_dir, instance_name, [*paths, *server_paths])
     # Launch from a copy, so serverDZ.cfg stays editable while the server runs. Made
     # after prepare_mission, which writes the template line into the editable file.

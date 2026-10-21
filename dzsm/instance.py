@@ -788,6 +788,77 @@ def _apply_steam_query_port(config: Config, instance_name: str, body: str) -> st
     return QUERY_PORT_PATTERN.sub(rf"\g<1>{wanted}", body, count=1)
 
 
+# Mods name this directory whatever they like: "keys", "Keys", "Key", "key" have all
+# been seen in one cache. Matching only the plural forms silently skips every mod that
+# used the singular, and the symptom lands on the player, not the server: the mod loads
+# fine, and the client is then kicked for a PBO the server cannot verify.
+KEY_DIRECTORY_NAMES = frozenset({"key", "keys"})
+
+
+def key_directories(mod_path: Path) -> list[Path]:
+    """Every directory in a mod that holds its .bikey files.
+
+    Listed rather than probed by name, so the comparison can be case-insensitive without
+    guessing which of the four spellings this mod picked.
+    """
+    try:
+        entries = sorted(mod_path.iterdir())
+    except OSError:
+        return []
+    return [
+        entry
+        for entry in entries
+        if entry.is_dir() and entry.name.lower() in KEY_DIRECTORY_NAMES
+    ]
+
+
+def carry_keys_forward(config: Config, server_dir: Path) -> list[Path]:
+    """Copy keys from the newest other build into this one.
+
+    Keys live in `serverapp/<buildid>/keys/`, so a server update starts from an empty
+    set and every mod's key has to be re-added. `sync_keys` only re-adds the keys of the
+    mods belonging to instances that are started afterwards — so a key belonging to an
+    instance that stays down, or to a mod no instance loads but whose *clients* carry it,
+    is simply lost. The symptom is a player kicked for a mod the server has, days after
+    the update, with nothing connecting the two.
+
+    Same reasoning as carrying a mission forward, and the same ordering: by build id, not
+    directory mtime.
+
+    Only ever adds, like sync_keys. Returns the keys added, empty when there is nothing
+    to carry (Rule 1).
+    """
+    destination = server_dir / "keys"
+    if not config.serverapp_dir.is_dir():
+        return []
+
+    others = [
+        build / "keys"
+        for build in config.serverapp_dir.iterdir()
+        if build.is_dir() and (build / "keys") != destination and (build / "keys").is_dir()
+    ]
+    if not others:
+        return []
+
+    others.sort(key=lambda keys: _build_sort_key(keys.parent.name), reverse=True)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    added: list[Path] = []
+    for source in others:
+        for key in source.glob("*.bikey"):
+            target = destination / key.name
+            if target.exists():
+                continue
+            try:
+                shutil.copy2(key, target)
+            except OSError as exc:
+                _log.error("could not carry key %s forward: %s", key, exc)
+                continue
+            _log.info("carried key %s forward from build %s", key.name, source.parent.name)
+            added.append(target)
+    return added
+
+
 def sync_keys(server_dir: Path, instance_name: str, paths: list[Path]) -> list[Path]:
     """Add each mod's .bikey files to the *server's* keys/ directory.
 
@@ -815,11 +886,7 @@ def sync_keys(server_dir: Path, instance_name: str, paths: list[Path]) -> list[P
 
     added: list[Path] = []
     for mod_path in paths:
-        # Mods are inconsistent about the casing of this directory.
-        for directory_name in ("keys", "Keys"):
-            key_directory = mod_path / directory_name
-            if not key_directory.is_dir():
-                continue
+        for key_directory in key_directories(mod_path):
             for key in key_directory.glob("*.bikey"):
                 target = destination / key.name
                 if target.exists():
