@@ -113,13 +113,13 @@ def test_falls_back_to_previous_pins_when_resolution_fails(cfg: Config) -> None:
     state.pins["chernarus"] = {"CF": OLD}
     # Nothing recorded in state.versions, so resolution cannot find a current version.
 
-    assert runner._versions_to_activate(cfg, state, "chernarus") == {"CF": OLD}
+    assert runner.versions_to_activate(cfg, state, "chernarus") == {"CF": OLD}
 
 
 def test_first_start_with_no_pins_still_raises(cfg: Config) -> None:
     """There is nothing to degrade to, so this is a genuine failure."""
     with pytest.raises(ModCacheError):
-        runner._versions_to_activate(cfg, State(), "chernarus")
+        runner.versions_to_activate(cfg, State(), "chernarus")
 
 
 # --- liveness ----------------------------------------------------------------
@@ -267,3 +267,47 @@ def test_start_creates_the_instance_layout(
 def test_start_rejects_an_unknown_instance(ready: Config) -> None:
     with pytest.raises(runner.RunnerError, match="unknown instance"):
         runner.start(ready, State(), "nope")
+
+
+def test_start_refuses_an_over_long_command_line(
+    ready: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checked before spawning, because Popen reports this as a bare OSError that says
+    nothing about the mod list being what is too long (Rule 3)."""
+    state = State()
+    _cache(ready, NEW)
+    state.record_version(WORKSHOP_ID, NEW)
+    monkeypatch.setattr(runner, "command_line_length", lambda _argv: 40000)
+
+    with pytest.raises(runner.RunnerError, match="over the 32767"):
+        runner.start(ready, state, "chernarus")
+
+
+def test_the_over_long_refusal_says_what_to_do_about_it(
+    ready: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A length alone leaves someone guessing. The lever is the root path, since every
+    mod path starts with it."""
+    state = State()
+    _cache(ready, NEW)
+    state.record_version(WORKSHOP_ID, NEW)
+    monkeypatch.setattr(runner, "command_line_length", lambda _argv: 40000)
+
+    message = str(
+        pytest.raises(runner.RunnerError, runner.start, ready, state, "chernarus").value
+    )
+
+    assert "2 mods" in message
+    assert "Shorten `root`" in message
+
+
+def test_a_command_line_inside_the_limit_starts(
+    ready: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard must not fire on anything real: two mods is 300-odd characters."""
+    state = State()
+    _cache(ready, NEW)
+    state.record_version(WORKSHOP_ID, NEW)
+    monkeypatch.setattr(runner, "_create_time", lambda pid: 1234.0)
+
+    assert runner.start(ready, state, "chernarus") == 4242

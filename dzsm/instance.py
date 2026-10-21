@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from dzsm.config import Config, InstanceConfig
@@ -35,6 +36,23 @@ def build_mod_argument(mod_paths: list[Path], *, option: str = "mod") -> str:
     The trailing semicolon matches Bohemia's own examples. It is harmless; keep it.
     """
     return f"-{option}={';'.join(str(p) for p in mod_paths)};"
+
+
+# Windows builds ONE string for CreateProcess out of the argv list and refuses past this.
+# The 8191 figure in every DayZ guide is cmd.exe's limit, which binds because the usual
+# setup launches the server from a .bat file; dzsm spawns the process directly with an
+# argv list and no shell, so that lower ceiling does not apply here. Keep it that way:
+# going back through a shell would cut the usable mod count by four.
+COMMAND_LINE_LIMIT = 32767
+
+
+def command_line_length(args: Sequence[str]) -> int:
+    """Length of the command line Windows actually builds from this argv.
+
+    Not the sum of the arguments: they are joined with spaces, and one containing a
+    space is quoted. Measuring the joined form is the only number the limit applies to.
+    """
+    return len(" ".join(f'"{a}"' if " " in a else a for a in args))
 
 
 def build_launch_args(

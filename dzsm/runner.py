@@ -25,8 +25,10 @@ import psutil
 
 from dzsm.config import Config, ConfigError, InstanceConfig, load_config
 from dzsm.instance import (
+    COMMAND_LINE_LIMIT,
     battleye_config_path,
     build_launch_args,
+    command_line_length,
     ensure_battleye_config,
     ensure_layout,
     prepare_mission,
@@ -85,7 +87,7 @@ def start(
     if rcon_port is not None:
         ensure_battleye_config(config, instance_name, rcon_port)
 
-    versions = _versions_to_activate(config, state, instance_name)
+    versions = versions_to_activate(config, state, instance_name)
     try:
         paths = mod_paths(config, instance_name, versions)
         server_paths = server_mod_paths(config, instance_name, versions)
@@ -104,8 +106,21 @@ def start(
     argv = build_launch_args(
         config, instance_name, instance, exe, paths, server_paths, active_config
     )
+    length = command_line_length(argv)
+    if length > COMMAND_LINE_LIMIT:
+        # Refused here rather than left to Popen, which reports it as a bare OSError with
+        # no hint that the mod list is what is too long (Rule 3).
+        raise RunnerError(
+            f"instance {instance_name!r} cannot start: its command line is {length} "
+            f"characters, over the {COMMAND_LINE_LIMIT} the OS accepts. "
+            f"{len(paths)} mods and {len(server_paths)} server mods are on it. Shorten "
+            f"`root` (every mod path starts with it) or drop a mod."
+        )
     _log.info("instance %s: starting on port %s", instance_name, instance.port)
-    _log.debug("instance %s: argv %s", instance_name, argv)
+    _log.debug(
+        "instance %s: argv %s (%s chars of %s)", instance_name, argv, length,
+        COMMAND_LINE_LIMIT,
+    )
 
     try:
         # Working directory is the server installation: DayZ resolves mpmissions/ and
@@ -468,7 +483,7 @@ def _reload(config: Config, current: State) -> State:
 # --- internals ---------------------------------------------------------------
 
 
-def _versions_to_activate(config: Config, state: State, instance_name: str) -> dict[str, int]:
+def versions_to_activate(config: Config, state: State, instance_name: str) -> dict[str, int]:
     """Versions for this start, falling back to the existing pins (Rule 4).
 
     A server up with slightly stale mods beats a server that is down, so a resolution

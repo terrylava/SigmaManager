@@ -15,7 +15,8 @@ from typing import Annotated, Any, NoReturn, Optional
 
 import typer
 
-from dzsm import players, runner
+from dzsm import instance as dzsm_instance
+from dzsm import mods, players, runner
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
 from dzsm.mods import (
@@ -1020,6 +1021,60 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
         typer.echo(f"{name:<16} {marker:<18} port {instance.port}  {rcon}  next {when}")
         typer.echo(f"{'':<16} server {build}")
         typer.echo(f"{'':<16} {versions}")
+
+
+@instance_app.command("args")
+def instance_args(
+    name: str,
+    config_path: ConfigPath = Path("config.toml"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Print only the length."),
+) -> None:
+    """Show the command line this instance would start with, and how long it is.
+
+    Read-only: it resolves versions and paths exactly as `start` does but prepares
+    nothing, so it is safe to run against a server that is up. The length is the number
+    the OS limit applies to — the joined, quoted form, not the sum of the arguments.
+
+    The limit people hit in DayZ guides is cmd.exe's 8191, which binds on the batch
+    files most setups launch from. dzsm does not go through a shell, so the ceiling here
+    is the OS one, four times higher.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    if name not in cfg.instances:
+        raise typer.BadParameter(f"unknown instance {name!r}")
+
+    instance = cfg.instances[name]
+    try:
+        server_dir = dzsm_instance.effective_server_dir(cfg, state, name)
+        exe = dzsm_instance.server_executable(server_dir, instance.server_executable)
+        versions = runner.versions_to_activate(cfg, state, name)
+        paths = mods.mod_paths(cfg, name, versions)
+        server_paths = mods.server_mod_paths(cfg, name, versions)
+    except (InstanceError, ModCacheError) as exc:
+        _fail(InstanceError(f"cannot build the command line for {name!r}: {exc}"))
+
+    argv = dzsm_instance.build_launch_args(
+        cfg, name, instance, exe, paths, server_paths,
+        dzsm_instance.active_config_path(cfg, name),
+    )
+    length = dzsm_instance.command_line_length(argv)
+    limit = dzsm_instance.COMMAND_LINE_LIMIT
+
+    if quiet:
+        typer.echo(length)
+        return
+
+    for argument in argv:
+        typer.echo(f"  {argument}")
+    typer.echo("")
+    typer.echo(f"{len(paths)} mods, {len(server_paths)} server mods")
+    headroom = limit - length
+    summary = f"{length} characters of {limit} ({headroom} spare)"
+    if length > limit:
+        typer.echo(typer.style(f"{summary} - OVER THE LIMIT", fg=typer.colors.RED))
+        raise typer.Exit(1)
+    typer.echo(typer.style(summary, fg=typer.colors.GREEN))
 
 
 @instance_app.command("say")
