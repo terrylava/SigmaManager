@@ -215,6 +215,12 @@ class WorkshopItem:
     file_size: int | None
 
 
+# Steam ranks results by whichever EPublishedFileQueryType it is handed, and most of
+# them ignore how well the text matched. Named rather than inlined so the next person
+# changing it has to say which ranking they mean.
+TEXT_SEARCH_RANKING = 12
+
+
 def search_workshop(
     api_key: str | None,
     text: str,
@@ -247,8 +253,13 @@ def search_workshop(
         "key": api_key,
         "appid": str(WORKSHOP_APPID),
         "search_text": text,
-        # 9 = ranked by text search relevance, which is what a search box should do.
-        "query_type": "9",
+        # EPublishedFileQueryType. 12 is RankedByTextSearch: the search text decides the
+        # ORDER, not just which items match. 9, which was here first, is
+        # RankedByTotalUniqueSubscriptions -- the text only filters, and the most
+        # subscribed survivor wins. That put a base-building mod at the top of a search
+        # for "zombie" and pushed an exact title match to third for "hercul". Measured
+        # against live Steam, not read off the enum.
+        "query_type": str(TEXT_SEARCH_RANKING),
         "page": str(max(1, page)),
         "numperpage": str(per_page),
         "filetype": "0",

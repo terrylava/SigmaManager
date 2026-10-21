@@ -294,3 +294,31 @@ def test_the_added_entry_is_a_workshop_mod(config_file: Path) -> None:
     settings.save(config_file, document)
 
     assert 'kind = "workshop"' in tomlkit.dumps(settings.read_document(config_file))
+
+
+def test_results_are_ranked_by_the_search_text() -> None:
+    """The ranking mode is the difference between a search box and a popularity chart.
+
+    query_type is EPublishedFileQueryType. 12 is RankedByTextSearch. 9, which was here
+    first under a comment claiming it was relevance, is RankedByTotalUniqueSubscriptions:
+    the text only decides what matches, and among those the most subscribed wins. Live,
+    that returned a base-building mod, an airdrop mod and a build-anywhere mod as the top
+    three hits for "zombie", and pushed the exactly-titled "Hercul" to third for
+    "hercul".
+    """
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.url.params)
+        return httpx.Response(200, json={"response": {"total": 0, "publishedfiledetails": []}})
+
+    search_workshop(KEY, "zombie", client=_client(handler))
+
+    assert seen["query_type"] == "12"
+
+
+def test_the_ranking_mode_is_named_not_inlined() -> None:
+    """So that changing it means stating which ranking you mean."""
+    from dzsm.steam import TEXT_SEARCH_RANKING
+
+    assert TEXT_SEARCH_RANKING == 12
