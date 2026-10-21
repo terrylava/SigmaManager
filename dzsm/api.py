@@ -86,11 +86,16 @@ _log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-DZSM-Token"  # noqa: S105 — a header name, not a secret
 
-# Search paging limits. Steam's query API stops returning results well before the total
-# it reports would suggest, so offering a page number for every match would produce empty
-# pages; 50 is deep enough that nobody sensibly pages that far for a mod.
+# Steam's own limit per request.
 MAX_SEARCH_PER_PAGE = 50
-MAX_SEARCH_PAGES = 50
+
+# This used to be 50, under a comment of mine claiming Steam stops returning results well
+# before the total it reports. It does not. Measured against live Steam: "trader" reports
+# 3044 and pages to 152 full pages plus 4 on the 153rd, which is exactly 3044; "car"
+# reports 4680 and ends at 4680; the Vehicle tag reports 5246 and ends at 5246. The cap
+# was hiding two thirds of every large result set. It survives only as a guard against a
+# nonsense total, set far above anything reachable by paging.
+MAX_SEARCH_PAGES = 1000
 
 # Methods that do not change anything, and so are not worth refusing cross-origin: the
 # response is unreadable to the calling page anyway, and refusing them would break
@@ -1371,8 +1376,8 @@ def create_app(config_path: Path) -> FastAPI:
             "per_page": per_page,
             "sort": sort,
             "tags": chosen,
-            # Steam caps how deep paging can go; without this the browser would offer
-            # pages that come back empty.
+            # The real page count, not a truncated one: Steam pages to the end of
+            # what it reports (measured — see MAX_SEARCH_PAGES).
             "pages": max(1, min(-(-total // per_page), MAX_SEARCH_PAGES)),
             "items": [_workshop_json(item, configured, state) for item in items],
         }

@@ -268,3 +268,30 @@ def test_the_category_filters_match_the_tags_steam_knows() -> None:
     rendered = set(re.findall(r"'([A-Za-z ]+)'", block))
 
     assert rendered == set(steam.WORKSHOP_TAGS)
+
+
+def test_typing_schedules_a_search_rather_than_sending_one() -> None:
+    """Ten keystrokes must be one request, not ten. Checked live: typing "helicopter"
+    sent exactly one."""
+    code = _without_comments(_dashboard_html())
+
+    assert "scheduleSearch(e.target.value)" in code
+    assert "clearTimeout(searchTimer)" in code
+    assert "SEARCH_DEBOUNCE_MS" in code
+
+
+def test_the_search_button_beats_a_pending_keystroke() -> None:
+    """Otherwise pressing Search races the timer it was meant to pre-empt."""
+    code = _without_comments(_dashboard_html())
+    handler = code.split("search: ()")[1].split(",\n")[0]
+
+    assert "clearTimeout(searchTimer)" in handler
+
+
+def test_a_stale_response_cannot_overwrite_a_newer_one() -> None:
+    """Searches issued while typing do not have to come back in order: a slow "zom"
+    landing after a fast "zombie" would replace the right results with older ones."""
+    code = _without_comments(_dashboard_html())
+
+    assert "const seq = ++searchSeq;" in code
+    assert code.count("if (seq !== searchSeq) return;") >= 3

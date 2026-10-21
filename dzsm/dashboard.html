@@ -501,7 +501,7 @@ const actions = {
 
   // --- workshop and local scan ---
 
-  search: () => searchWorkshop(),
+  search: () => { clearTimeout(searchTimer); searchWorkshop(); },
   page: d => searchWorkshop(+d.page),
 
   // Changing either re-runs the search immediately rather than waiting for Search to be
@@ -1266,6 +1266,8 @@ let hitsQuery = '';
 let hitsPage = 1;
 let hitsPages = 1;
 let hitsSort = 'relevance';
+let searchTimer = null;   // the pending as-you-type search
+let searchSeq = 0;        // which search the newest response belongs to
 let hitsTags = [];        // AND-ed, in the order of SEARCH_TAGS
 let pendingQuery = '';    // survives a repaint, so a background refresh cannot eat it
 let pendingChat = '';     // same, for the chat box
@@ -1290,16 +1292,24 @@ async function searchWorkshop(page) {
       + '&sort=' + encodeURIComponent(hitsSort)
       + '&tags=' + encodeURIComponent(hitsTags.join(','));
 
+  // Typing issues a search per pause, and the answers do not have to come back in
+  // the order they were asked for: a slow "zom" landing after a fast "zombie" would
+  // quietly replace the right results with older ones. Only the newest search may
+  // write to the list.
+  const seq = ++searchSeq;
   busy = true; painted = ''; render();
   try {
     const r = await fetch(url, {headers: headers()});
     const out = await r.json();
+    if (seq !== searchSeq) return;
     if (!r.ok) { say(out.detail || 'search failed', true); hits = []; hitsPages = 1; }
     else if (direct) { hits = [out]; hitsTotal = 1; hitsPages = 1; }
     else { hits = out.items; hitsTotal = out.total; hitsPages = out.pages; }
   } catch (e) {
+    if (seq !== searchSeq) return;
     say('search failed: ' + e, true); hits = []; hitsPages = 1;
   } finally {
+    if (seq !== searchSeq) return;
     busy = false; painted = ''; render();
     // Paging redraws the list above the fold; without this the second page opens
     // scrolled to wherever the first one was being read.
@@ -1308,6 +1318,28 @@ async function searchWorkshop(page) {
       if (box) box.scrollIntoView({block: 'center'});
     }
   }
+}
+
+// Long enough that typing a word is one search rather than six, short enough that it
+// still feels like the page is keeping up. Every keystroke cancels the pending one.
+const SEARCH_DEBOUNCE_MS = 450;
+
+// Two characters match most of the Workshop, so the results are noise and the request
+// is waste. The Search button still honours anything, for a deliberate short query.
+const SEARCH_MIN_LENGTH = 3;
+
+function scheduleSearch(text) {
+  clearTimeout(searchTimer);
+  const trimmed = text.trim();
+  // Nothing to search and no category ticked: clear the list rather than leaving the
+  // last results under an empty box, which reads as results for nothing.
+  if (!trimmed && !hitsTags.length) {
+    hits = null; hitsQuery = ''; painted = ''; render();
+    return;
+  }
+  if (trimmed && trimmed.length < SEARCH_MIN_LENGTH) return;
+  if (trimmed === hitsQuery) return;
+  searchTimer = setTimeout(() => searchWorkshop(), SEARCH_DEBOUNCE_MS);
 }
 
 function pager() {
@@ -1773,7 +1805,7 @@ async function load() {
 // half-typed query should not freeze the page's live updates the way an unsaved setting
 // does.
 document.addEventListener('input', e => {
-  if (e.target.id === 'q') pendingQuery = e.target.value;
+  if (e.target.id === 'q') { pendingQuery = e.target.value; scheduleSearch(e.target.value); }
   if (e.target.id === 'lp') localPath = e.target.value;
   if (e.target.id === 'chat') pendingChat = e.target.value;
   if (e.target.id === 'cfgtext') cfgText = e.target.value;

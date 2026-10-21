@@ -426,10 +426,22 @@ def test_it_reports_how_many_pages_there_are(
     assert body["per_page"] == 20
 
 
-def test_paging_is_capped(search_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Steam stops answering long before its own total runs out, so offering a page per
-    match would produce empty pages."""
-    monkeypatch.setattr(api, "search_workshop", _fake_search(100_000))
+def test_every_page_of_a_large_result_is_offered(
+    search_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Steam pages to the end of the total it reports — measured, against three queries.
+    The cap that was here instead offered 50 pages of 3,044 "trader" results and hid the
+    other two thirds."""
+    monkeypatch.setattr(api, "search_workshop", _fake_search(3044))
+
+    assert search_client.get("/api/workshop/search?q=a").json()["pages"] == 153
+
+
+def test_a_nonsense_total_is_still_bounded(
+    search_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap survives only for this: a total no amount of paging could reach."""
+    monkeypatch.setattr(api, "search_workshop", _fake_search(100_000_000))
 
     assert search_client.get("/api/workshop/search?q=a").json()["pages"] == api.MAX_SEARCH_PAGES
 
