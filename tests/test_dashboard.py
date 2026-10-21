@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from dzsm import settings
+from dzsm import settings, steam
 from dzsm.api import _dashboard_html, create_app
 from dzsm.config import Config
 from dzsm.state import State, save_state
@@ -248,3 +248,23 @@ def test_the_ports_panel_checks_the_launcher_range() -> None:
 
     assert "const VANILLA_QUERY_RANGE = [27015, 27019];" in code
     assert "launcherNote(i.steam_query_port)" in code
+
+
+SEARCH_SORT = re.compile(r"\['([a-z]+)', '[^']+'\]")
+
+
+def test_the_sort_options_match_the_rankings_the_api_accepts() -> None:
+    """The page hardcodes the list because it is static HTML, so the only thing stopping
+    the two drifting is this test. A stale name renders a dropdown entry that 422s."""
+    block = _dashboard_html().split("const SEARCH_SORTS = [")[1].split("];")[0]
+
+    assert set(SEARCH_SORT.findall(block)) == set(steam.RANKINGS)
+
+
+def test_the_category_filters_match_the_tags_steam_knows() -> None:
+    """Guessing this vocabulary does not work — "Weapons" and "Buildings" both match
+    nothing — so a typo here is a checkbox that silently returns no results."""
+    block = _dashboard_html().split("const SEARCH_TAGS = [")[1].split("];")[0]
+    rendered = set(re.findall(r"'([A-Za-z ]+)'", block))
+
+    assert rendered == set(steam.WORKSHOP_TAGS)

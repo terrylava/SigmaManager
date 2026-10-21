@@ -45,16 +45,19 @@
  .panel h3 { margin: 0 0 .8rem; font-size: .9rem; color: #bbb }
  .field { display: flex; gap: .6rem; align-items: center; margin-bottom: .6rem; flex-wrap: wrap }
  .field > label:first-child { width: 12rem; color: #888; flex: none }
- .cores { display: flex; flex-wrap: wrap; gap: .35rem; max-width: 40rem }
- .cores label { border: 1px solid #333; border-radius: 4px; padding: .1rem .45rem;
+ .cores, .stags { display: flex; flex-wrap: wrap; gap: .35rem; max-width: 40rem }
+ .cores label, .stags label { border: 1px solid #333; border-radius: 4px;
+                padding: .1rem .45rem;
                 cursor: pointer; user-select: none; font-variant-numeric: tabular-nums }
  /* :has() keeps the tick state purely declarative — the alternative was an inline
     onchange on every core, which is exactly the pattern this file no longer uses. */
- .cores label:has(input:checked) { border-color: #2f6f4f; color: #4ade80; background: #16281c }
+ .cores label:has(input:checked), .stags label:has(input:checked)
+   { border-color: #2f6f4f; color: #4ade80; background: #16281c }
  /* Hidden visually but still focusable and still in the accessibility tree.
     display:none would drop it out of the tab order entirely. */
- .cores input { position: absolute; opacity: 0; width: 1px; height: 1px }
- .cores label:focus-within { outline: 2px solid #4ade80; outline-offset: 1px }
+ .cores input, .stags input { position: absolute; opacity: 0; width: 1px; height: 1px }
+ .cores label:focus-within, .stags label:focus-within
+   { outline: 2px solid #4ade80; outline-offset: 1px }
  select, input[type=number], input[type=text] {
    font: inherit; background: #1a1a1a; color: #ddd; border: 1px solid #333;
    border-radius: 4px; padding: .2rem .4rem }
@@ -500,6 +503,20 @@ const actions = {
 
   search: () => searchWorkshop(),
   page: d => searchWorkshop(+d.page),
+
+  // Changing either re-runs the search immediately rather than waiting for Search to be
+  // pressed again: a filter that needs a second click reads as a filter that did not
+  // work. From the BOX, not the held query - paging has to stay on the results being
+  // read, but someone adjusting a filter is looking straight at the box, and emptying it
+  // and ticking a category must become a browse rather than silently keeping the old
+  // text. That is what it did first.
+  sort: (d, el) => { hitsSort = el.value; searchWorkshop(); },
+
+  tag: (d, el) => {
+    hitsTags = SEARCH_TAGS.filter(
+      tag => tag === el.value ? el.checked : hitsTags.includes(tag));
+    searchWorkshop();
+  },
   addWorkshop: d => addMod(d.id),
   scan: scanLocal,
   addLocal: d => addLocal(d.path),
@@ -1248,6 +1265,8 @@ let hitsTotal = 0;
 let hitsQuery = '';
 let hitsPage = 1;
 let hitsPages = 1;
+let hitsSort = 'relevance';
+let hitsTags = [];        // AND-ed, in the order of SEARCH_TAGS
 let pendingQuery = '';    // survives a repaint, so a background refresh cannot eat it
 let pendingChat = '';     // same, for the chat box
 
@@ -1256,7 +1275,9 @@ async function searchWorkshop(page) {
   // the box may have been typed into since, and page 2 must be page 2 of the results
   // actually on screen.
   const raw = page ? hitsQuery : val('q');
-  if (!raw) return;
+  // A category with no text is a browse, so an empty box is only a no-op when nothing
+  // is ticked either.
+  if (!raw && !hitsTags.length) return;
   hitsQuery = raw;
   hitsPage = page || 1;
 
@@ -1265,7 +1286,9 @@ async function searchWorkshop(page) {
   const direct = raw.match(/^\s*(?:https?:\/\/\S*[?&]id=)?(\d{6,})\s*$/);
   const url = direct
     ? 'api/workshop/' + direct[1]
-    : 'api/workshop/search?q=' + encodeURIComponent(raw) + '&page=' + hitsPage;
+    : 'api/workshop/search?q=' + encodeURIComponent(raw) + '&page=' + hitsPage
+      + '&sort=' + encodeURIComponent(hitsSort)
+      + '&tags=' + encodeURIComponent(hitsTags.join(','));
 
   busy = true; painted = ''; render();
   try {
@@ -1361,6 +1384,42 @@ function targetBoxes(cls) {
     + '</div></div>';
 }
 
+// Steam's orderings, by the names the API uses. "Best match" lets the search text
+// decide the order; the rest ignore it, which is the right thing when the query is a
+// category rather than a name.
+const SEARCH_SORTS = [
+  ['relevance', 'Best match'],
+  ['subscribers', 'Most subscribed'],
+  ['rating', 'Top rated'],
+  ['updated', 'Recently updated'],
+  ['newest', 'Newest'],
+];
+
+// DayZ's own Workshop categories, sampled from 800 live items. Not guessable: "Weapons"
+// and "Buildings" are the obvious names and both match nothing. "Mod" is on every item,
+// so it is not a filter, and the moderation states are not categories either.
+const SEARCH_TAGS = ['Animation', 'Character', 'Economy', 'Environment', 'Equipment',
+                     'Mechanics', 'Props', 'Server', 'Sound', 'Terrain', 'Vehicle',
+                     'Weapon'];
+
+function searchControls() {
+  const option = ([value, label]) =>
+    '<option' + attr('value', value) + (hitsSort === value ? ' selected' : '') + '>'
+    + label + '</option>';
+  const chip = tag =>
+    '<label><input type="checkbox" data-change="tag"' + attr('value', tag)
+    + (hitsTags.includes(tag) ? ' checked' : '') + '> ' + tag + '</label>';
+
+  return '<div class="field"><label>Sort by</label>'
+      + '<select id="sort" data-change="sort">' + SEARCH_SORTS.map(option).join('') + '</select>'
+      + '<span class="note">the other orderings ignore how well the text matched, which '
+      + 'is what you want when the query is a category</span></div>'
+    + '<div class="field"><label>Categories</label><div class="stags">'
+      + SEARCH_TAGS.map(chip).join('') + '</div></div>'
+    + '<p class="note">Ticking a category with an empty box browses it: every Vehicle '
+      + 'mod by Recently updated is how you find what was rebuilt for a new patch.</p>';
+}
+
 function workshopPanel() {
   let h = '<h2>Workshop</h2><div class="panel">'
     + '<div class="field">'
@@ -1368,13 +1427,17 @@ function workshopPanel() {
       + ' placeholder="Search, or paste a Workshop link or id"'
       + ' style="flex:1;min-width:18rem">'
       + '<button data-act="search"' + (busy ? ' disabled' : '') + '>Search</button>'
-    + '</div>' + targetBoxes('wtargets');
+    + '</div>' + searchControls() + targetBoxes('wtargets');
 
   if (hits === null) {
     h += '<p class="note">Searching needs a Steam Web API key. Pasting a link or an id '
        + 'does not, so that works either way.</p>';
   } else if (!hits.length) {
-    h += '<p class="note">nothing found for &ldquo;' + esc(hitsQuery) + '&rdquo;</p>';
+    const what = [
+      hitsQuery ? '&ldquo;' + esc(hitsQuery) + '&rdquo;' : '',
+      hitsTags.length ? 'in ' + esc(hitsTags.join(' + ')) : '',
+    ].filter(Boolean).join(' ');
+    h += '<p class="note">nothing found for ' + (what || 'that') + '</p>';
   } else {
     h += hits.map(hitRow).join('') + pager();
   }

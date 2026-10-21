@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -220,6 +221,36 @@ class WorkshopItem:
 # changing it has to say which ranking they mean.
 TEXT_SEARCH_RANKING = 12
 
+# The orderings worth offering, each confirmed against live Steam rather than read off
+# the enum. Keys are what the API and the dashboard pass around: the enum number is
+# Steam's business and does not belong in a URL or a <select>.
+RANKINGS: dict[str, int] = {
+    "relevance": TEXT_SEARCH_RANKING,   # RankedByTextSearch
+    "subscribers": 9,                   # RankedByTotalUniqueSubscriptions
+    "rating": 0,                        # RankedByVote
+    "updated": 21,                      # RankedByLastUpdatedDate
+    "newest": 1,                        # RankedByPublicationDate
+}
+
+# DayZ's Workshop categories. Sampled from 800 live items, which turned up 15 distinct
+# tags: these twelve, plus "Mod" (on every single item, so useless as a filter) and the
+# moderation states "Tag Review" and "Content Review". Guessing this list does not work
+# - "Weapons" and "Buildings" are the obvious names and both match nothing.
+WORKSHOP_TAGS: tuple[str, ...] = (
+    "Animation",
+    "Character",
+    "Economy",
+    "Environment",
+    "Equipment",
+    "Mechanics",
+    "Props",
+    "Server",
+    "Sound",
+    "Terrain",
+    "Vehicle",
+    "Weapon",
+)
+
 
 def search_workshop(
     api_key: str | None,
@@ -227,6 +258,8 @@ def search_workshop(
     *,
     page: int = 1,
     per_page: int = 20,
+    ranking: str = "relevance",
+    tags: Sequence[str] = (),
     timeout: float = 30.0,
     client: httpx.Client | None = None,
 ) -> tuple[list[WorkshopItem], int]:
@@ -240,7 +273,19 @@ def search_workshop(
 
     Returns an empty list for an empty query rather than fetching the whole Workshop.
     """
-    if not text.strip():
+    if ranking not in RANKINGS:
+        raise SteamError(
+            f"unknown sort {ranking!r}. One of: {', '.join(sorted(RANKINGS))}"
+        )
+    unknown = [tag for tag in tags if tag not in WORKSHOP_TAGS]
+    if unknown:
+        # Steam answers an unknown tag with zero results and no error, which reads as
+        # "nothing matched" rather than "that filter does not exist".
+        raise SteamError(
+            f"unknown tag(s) {', '.join(unknown)}. One of: {', '.join(WORKSHOP_TAGS)}"
+        )
+    # A tag on its own is a browse, not a search, and Steam is happy to answer it.
+    if not text.strip() and not tags:
         return [], 0
     if not api_key:
         raise SteamError(
@@ -253,13 +298,12 @@ def search_workshop(
         "key": api_key,
         "appid": str(WORKSHOP_APPID),
         "search_text": text,
-        # EPublishedFileQueryType. 12 is RankedByTextSearch: the search text decides the
-        # ORDER, not just which items match. 9, which was here first, is
-        # RankedByTotalUniqueSubscriptions -- the text only filters, and the most
-        # subscribed survivor wins. That put a base-building mod at the top of a search
-        # for "zombie" and pushed an exact title match to third for "hercul". Measured
-        # against live Steam, not read off the enum.
-        "query_type": str(TEXT_SEARCH_RANKING),
+        # EPublishedFileQueryType. The default, RankedByTextSearch, is the one where the
+        # search text decides the ORDER and not just which items match. The ranking that
+        # was here first, RankedByTotalUniqueSubscriptions, only filtered by the text and
+        # then let the most subscribed survivor win: a base-building mod topped a search
+        # for "zombie", and an exact title match came third for "hercul".
+        "query_type": str(RANKINGS[ranking]),
         "page": str(max(1, page)),
         "numperpage": str(per_page),
         "filetype": "0",
@@ -268,6 +312,10 @@ def search_workshop(
         "return_metadata": "true",
         "strip_description_bbcode": "true",
     }
+
+    # requiredtags is an indexed array in the query string, not a repeated key.
+    for index, tag in enumerate(tags):
+        params[f"requiredtags[{index}]"] = tag
 
     owns_client = client is None
     http = client if client is not None else httpx.Client(timeout=timeout)

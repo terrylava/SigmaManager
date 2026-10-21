@@ -472,3 +472,81 @@ def test_last_checked_survives_a_round_trip(config: Config) -> None:
     save_state(config.state_file, State(last_checked_at=when))
 
     assert load_state(config.state_file).last_checked_at == when
+
+
+# --- sort and category filters reach Steam -----------------------------------
+
+
+def _capturing_search(seen: dict[str, object]) -> Callable[..., tuple[list[WorkshopItem], int]]:
+    def search(
+        api_key: str | None, text: str, **kw: object
+    ) -> tuple[list[WorkshopItem], int]:
+        seen.update(kw)
+        seen["text"] = text
+        return [], 0
+
+    return search
+
+
+def test_the_sort_and_tags_reach_the_search(
+    search_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(api, "search_workshop", _capturing_search(seen))
+
+    search_client.get("/api/workshop/search?q=zombie&sort=updated&tags=Character,Sound")
+
+    assert seen["ranking"] == "updated"
+    assert seen["tags"] == ["Character", "Sound"]
+
+
+def test_the_defaults_are_relevance_and_no_filter(
+    search_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(api, "search_workshop", _capturing_search(seen))
+
+    search_client.get("/api/workshop/search?q=zombie")
+
+    assert seen["ranking"] == "relevance"
+    assert seen["tags"] == []
+
+
+def test_a_category_with_no_query_is_allowed(
+    search_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Browsing a category is a real use: every Vehicle mod by Recently updated."""
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(api, "search_workshop", _capturing_search(seen))
+
+    response = search_client.get("/api/workshop/search?tags=Vehicle&sort=updated")
+
+    assert response.status_code == 200
+    assert seen["text"] == ""
+
+
+def test_an_unknown_sort_is_a_client_error(search_client: TestClient) -> None:
+    """422, not 502: the request is wrong, Steam is fine."""
+    response = search_client.get("/api/workshop/search?q=a&sort=popularity")
+
+    assert response.status_code == 422
+    assert "unknown sort" in response.json()["detail"]
+
+
+def test_an_unknown_tag_is_a_client_error(search_client: TestClient) -> None:
+    response = search_client.get("/api/workshop/search?q=a&tags=Weapons")
+
+    assert response.status_code == 422
+    assert "Weapon" in response.json()["detail"]
+
+
+def test_the_applied_sort_and_tags_come_back(
+    search_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """So the page can render what it actually asked for rather than what it meant to."""
+    monkeypatch.setattr(api, "search_workshop", _capturing_search({}))
+
+    body = search_client.get("/api/workshop/search?q=a&sort=rating&tags=Props").json()
+
+    assert body["sort"] == "rating"
+    assert body["tags"] == ["Props"]

@@ -322,3 +322,69 @@ def test_the_ranking_mode_is_named_not_inlined() -> None:
     from dzsm.steam import TEXT_SEARCH_RANKING
 
     assert TEXT_SEARCH_RANKING == 12
+
+
+# --- sort and category filters -----------------------------------------------
+
+
+def test_a_sort_is_named_not_numbered() -> None:
+    """Steam's enum number has no business in a URL or a <select>."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.url.params)
+        return httpx.Response(200, json={"response": {"total": 0, "publishedfiledetails": []}})
+
+    search_workshop(KEY, "trader", ranking="updated", client=_client(handler))
+
+    assert seen["query_type"] == "21"
+
+
+def test_an_unknown_sort_is_refused() -> None:
+    with pytest.raises(SteamError, match="unknown sort"):
+        search_workshop(KEY, "trader", ranking="popularity")
+
+
+def test_tags_go_out_as_an_indexed_array() -> None:
+    """requiredtags is indexed in the query string, not a repeated key."""
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.url.params)
+        return httpx.Response(200, json={"response": {"total": 0, "publishedfiledetails": []}})
+
+    search_workshop(KEY, "zombie", tags=("Character", "Sound"), client=_client(handler))
+
+    assert seen["requiredtags[0]"] == "Character"
+    assert seen["requiredtags[1]"] == "Sound"
+
+
+def test_an_unknown_tag_is_refused_rather_than_returning_nothing() -> None:
+    """Steam answers an unknown tag with zero results and no error, which reads as
+    "nothing matched" rather than "that filter does not exist". "Weapons" and
+    "Buildings" are the obvious guesses and both match nothing."""
+    with pytest.raises(SteamError, match="unknown tag"):
+        search_workshop(KEY, "zombie", tags=("Weapons",))
+
+
+def test_a_category_with_no_text_is_a_browse() -> None:
+    """Every Vehicle mod by Recently updated is how you find what was rebuilt for a new
+    patch, and it needs no search text at all."""
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"response": {"total": 0, "publishedfiledetails": []}})
+
+    search_workshop(KEY, "", tags=("Vehicle",), client=_client(handler))
+
+    assert called
+
+
+def test_an_empty_query_with_no_tags_still_fetches_nothing() -> None:
+    """The guard that stops an empty box pulling down the whole Workshop."""
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("should not have been called")
+
+    assert search_workshop(KEY, "   ", client=_client(handler)) == ([], 0)

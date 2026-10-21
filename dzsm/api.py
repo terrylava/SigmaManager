@@ -66,6 +66,8 @@ from dzsm.mods import (
 from dzsm.rcon import PlayerSlot, RconError, RconEvent, RconSession, parse_players
 from dzsm.state import State, load_state, save_state
 from dzsm.steam import (
+    RANKINGS,
+    WORKSHOP_TAGS,
     SteamError,
     SteamGuardRequired,
     SteamLoginFailed,
@@ -1305,12 +1307,23 @@ def create_app(config_path: Path) -> FastAPI:
     # --- workshop ------------------------------------------------------------
 
     @app.get("/api/workshop/search")
-    def workshop_search(q: str, page: int = 1, per_page: int = 20) -> dict[str, Any]:
+    def workshop_search(
+        q: str = "",
+        page: int = 1,
+        per_page: int = 20,
+        sort: str = "relevance",
+        tags: str = "",
+    ) -> dict[str, Any]:
         """Search the DayZ Workshop, one page at a time.
 
         Steam's own page cannot be embedded — it sends frame-ancestors headers, and a
         cross-origin frame could not be read from anyway — so this is our own search over
         their Web API.
+
+        `sort` names an ordering rather than passing Steam's enum number through a URL,
+        and `tags` is a comma-separated subset of the Workshop's own categories. Either
+        one works without `q`: a tag with no text is a browse, which is how you find
+        every vehicle mod updated since the last patch.
 
         `total` is Steam's count of everything matching, not what came back, so the caller
         can offer the pages it has not fetched.
@@ -1319,9 +1332,30 @@ def create_app(config_path: Path) -> FastAPI:
         if page < 1:
             raise HTTPException(status_code=422, detail="page starts at 1")
         per_page = max(1, min(per_page, MAX_SEARCH_PER_PAGE))
+        chosen = [tag for tag in tags.split(",") if tag]
+        # 422, not 502: an unknown sort or tag is this request being wrong, not Steam
+        # failing. They reach the same check inside search_workshop, which is what keeps
+        # the CLI honest too; this one only decides the status code.
+        if sort not in RANKINGS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown sort {sort!r}. One of: {', '.join(sorted(RANKINGS))}",
+            )
+        unknown = [tag for tag in chosen if tag not in WORKSHOP_TAGS]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown tag(s) {', '.join(unknown)}. "
+                f"One of: {', '.join(WORKSHOP_TAGS)}",
+            )
         try:
             items, total = search_workshop(
-                config.steam.api_key(), q, page=page, per_page=per_page
+                config.steam.api_key(),
+                q,
+                page=page,
+                per_page=per_page,
+                ranking=sort,
+                tags=chosen,
             )
         except SteamError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1335,6 +1369,8 @@ def create_app(config_path: Path) -> FastAPI:
             "total": total,
             "page": page,
             "per_page": per_page,
+            "sort": sort,
+            "tags": chosen,
             # Steam caps how deep paging can go; without this the browser would offer
             # pages that come back empty.
             "pages": max(1, min(-(-total // per_page), MAX_SEARCH_PAGES)),
