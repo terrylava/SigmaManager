@@ -111,6 +111,19 @@ const mib = b => (b / 1048576).toFixed(1) + ' MiB';
 const age = d => d == null ? '?' : d.toFixed(1) + 'd';
 const attr = (name, value) => ' ' + name + '="' + esc(value) + '"';
 
+// A workshop id is the thing people cross-check against Steam: is this the mod I think
+// it is, what changed in the update, does the author say it is 1.30-ready. A new tab,
+// because this page is often the only thing holding what the server is doing, and
+// noopener because the opened page must not get a handle on this one.
+const WORKSHOP_URL = 'https://steamcommunity.com/sharedfiles/filedetails/?id=';
+
+function steamLink(workshopId, inner) {
+  // Local mods have no Workshop page, so callers pass a falsy id and get plain text.
+  if (!workshopId) return inner;
+  return '<a' + attr('href', WORKSHOP_URL + workshopId)
+    + ' target="_blank" rel="noopener noreferrer">' + inner + '</a>';
+}
+
 let busy = false;
 let jobs = [];
 let unauthorized = false;   // a gated read came back 401: the token is missing or wrong
@@ -961,12 +974,13 @@ function instanceModRow(i, name, list, order) {
   const d = busy ? ' disabled' : '';
   const where = mod.kind === 'local'
     ? '<code>local</code> <span class="note">' + esc(mod.path || '') + '</span>'
-    : '<code>' + esc(mod.workshop_id) + '</code>';
+    : steamLink(mod.workshop_id, '<code>' + esc(mod.workshop_id) + '</code>');
   const opt = v => '<option' + attr('value', v) + (v === list ? ' selected' : '') + '>'
     + LIST_LABELS[v] + '</option>';
   const dataset = attr('data-name', i.name) + attr('data-mod', name);
   return '<tr>'
-    + '<td>' + (order == null ? '' : '<span class="note">' + order + '.</span> ') + esc(name)
+    + '<td>' + (order == null ? '' : '<span class="note">' + order + '.</span> ')
+      + steamLink(mod.workshop_id, esc(name))
     + '<td>' + where
     + '<td><select data-change="instSetList"' + dataset + d + '>'
       + opt('mods') + opt('server_mods') + opt('keep_mods') + '</select>'
@@ -1230,11 +1244,11 @@ function modRow(m) {
             ? '<br><span class="warn">' + m.latest_remote + ' available</span>' : '')
        : '<span class="note">not downloaded</span>');
   const source = m.kind === 'workshop'
-    ? '<code>' + esc(m.workshop_id) + '</code>'
+    ? steamLink(m.workshop_id, '<code>' + esc(m.workshop_id) + '</code>')
     : '<span class="note">' + esc(m.path || '') + '</span>';
   const d = busy ? ' disabled' : '';
   return '<tr>'
-    + '<td>' + esc(m.name)
+    + '<td>' + steamLink(m.kind === 'workshop' && m.workshop_id, esc(m.name))
     + '<td>' + source
     + '<td>' + cached
     + '<td>' + where
@@ -1252,7 +1266,7 @@ function versionRow(v) {
         ? '<span class="held">kept by ' + esc(v.kept_by.join(', ')) + '</span>'
         : '<span class="warn">unused</span>');
   return '<tr>'
-    + '<td>' + esc(v.mod_name || v.workshop_id)
+    + '<td>' + steamLink(v.workshop_id, esc(v.mod_name || v.workshop_id))
     + '<td><code>' + v.version + '</code>'
     + '<td>' + mib(v.size_bytes)
     + '<td>' + age(v.age_days)
@@ -1380,16 +1394,16 @@ async function addMod(id) {
 }
 
 function hitRow(h) {
-  const img = h.preview_url
+  const img = steamLink(h.workshop_id, h.preview_url
     ? '<img' + attr('src', h.preview_url) + ' alt="" loading="lazy">'
-    : '<img alt="">';
+    : '<img alt="">');
   const meta = [];
   if (h.subscriptions) meta.push(h.subscriptions.toLocaleString() + ' subscribers');
   if (h.file_size) meta.push(mib(h.file_size));
   if (h.time_updated) {
     meta.push('updated ' + new Date(h.time_updated * 1000).toISOString().slice(0, 10));
   }
-  meta.push('id ' + h.workshop_id);
+
 
   const action = h.configured_as
     ? '<span class="run">added as ' + esc(h.configured_as) + '</span>'
@@ -1398,9 +1412,13 @@ function hitRow(h) {
 
   return '<div class="hit">' + img
     + '<div class="body">'
-      + '<div class="title">' + esc(h.title) + '</div>'
+      + '<div class="title">' + steamLink(h.workshop_id, esc(h.title)) + '</div>'
       + '<div class="desc">' + esc(h.description) + '</div>'
-      + '<div class="meta">' + meta.map(esc).join(' &middot; ') + '</div>'
+      + '<div class="meta">'
+        + meta.map(esc).join(' &middot; ')
+        + (meta.length ? ' &middot; ' : '')
+        + steamLink(h.workshop_id, 'id ' + esc(h.workshop_id))
+      + '</div>'
     + '</div>'
     + '<div class="act">' + action + '</div>'
   + '</div>';

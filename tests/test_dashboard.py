@@ -160,13 +160,26 @@ def test_versions_carry_kept_by(client: TestClient) -> None:
     # No versions cached here, but the shape is asserted where one exists in test_api.
 
 
-def test_the_dashboard_is_served_and_self_contained(client: TestClient) -> None:
-    """A strict local page with no CDN: nothing may reference an external host."""
+def test_the_dashboard_loads_nothing_from_the_internet(client: TestClient) -> None:
+    """A strict local page with no CDN: no script, stylesheet, font or image in the
+    markup may come from another host, so the dashboard works on a box with no route
+    out and cannot be changed by one.
+
+    A link is a different thing from a load. An <a href> is somewhere the person chose
+    to go when they clicked it, and Workshop ids link to Steam on purpose — that is the
+    whole point of showing the id. So the rule is about what the page *fetches*, plus a
+    whitelist of the hosts it is allowed to name at all, which still fails on a CDN
+    script someone pastes in.
+    """
     html = client.get("/").text
 
     assert "<title>dzsm</title>" in html
-    assert "http://" not in html.replace("http://127.0.0.1", "")
-    assert "https://" not in html
+    assert not re.search(r'src\s*=\s*"https?://', html)
+    assert not re.search(r"<link[^>]+href\s*=\s*.https?://", html, re.I)
+    assert "@import" not in html
+
+    hosts = set(re.findall(r"https?://([^/\s\"'<>]+)", html))
+    assert hosts <= {"steamcommunity.com", "127.0.0.1"}, hosts
 
 
 def test_it_names_what_cannot_be_done_from_the_browser(client: TestClient) -> None:
@@ -295,3 +308,30 @@ def test_a_stale_response_cannot_overwrite_a_newer_one() -> None:
 
     assert "const seq = ++searchSeq;" in code
     assert code.count("if (seq !== searchSeq) return;") >= 3
+
+
+def test_workshop_ids_link_to_steam() -> None:
+    """Every place a workshop id or the name of a workshop mod is shown: the search
+    results, the mods table, a server's mod list, and the cached versions."""
+    code = _without_comments(_dashboard_html())
+
+    assert "https://steamcommunity.com/sharedfiles/filedetails/?id=" in code
+    # search result thumbnail, title and id; the two mod tables; the versions table
+    assert code.count("steamLink(") >= 8
+
+
+def test_a_steam_link_cannot_reach_back_into_the_page() -> None:
+    """target=_blank without noopener hands the opened page a handle on this one."""
+    code = _without_comments(_dashboard_html())
+    anchor = code.split("function steamLink(")[1].split("}")[0]
+
+    assert 'target="_blank"' in anchor
+    assert 'rel="noopener noreferrer"' in anchor
+
+
+def test_a_local_mod_is_not_linked_to_a_workshop_page() -> None:
+    """It does not have one. The helper takes a falsy id and returns the text."""
+    code = _without_comments(_dashboard_html())
+    body = code.split("function steamLink(")[1].split("\n}")[0]
+
+    assert "if (!workshopId) return inner;" in body
