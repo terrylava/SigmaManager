@@ -30,8 +30,10 @@ connection open for twenty minutes.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import sys
+import tempfile
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -551,6 +553,10 @@ def create_app(config_path: Path) -> FastAPI:
         )
         checker.start()
         sessions.start()
+        # Here rather than at import: this is the long-running form, and it is the one
+        # whose stops leave bundles behind. `dzsm instance status` should not go
+        # rummaging in TEMP.
+        sweep_stale_bundles()
         try:
             yield
         finally:
@@ -1806,6 +1812,83 @@ def _dashboard_path() -> Path:
     if bundle is not None:
         return Path(bundle) / "dzsm" / "dashboard.html"
     return Path(__file__).parent / "dashboard.html"
+
+
+# What a PyInstaller onefile build leaves in TEMP, and how to tell ours from anyone
+# else's. The marker is the data file this program bundles; every other application
+# using onefile unpacks into a directory with the same _MEI prefix, and deleting one of
+# theirs would be rude at best.
+BUNDLE_PREFIX = "_MEI"
+BUNDLE_MARKER = Path("dzsm") / "dashboard.html"
+
+
+def sweep_stale_bundles(*, temp_dir: Path | None = None, keep: Path | None = None) -> list[Path]:
+    """Delete unpacked copies of this program that an earlier run failed to remove.
+
+    A onefile build unpacks itself — the interpreter, its DLLs, dashboard.html — into
+    %TEMP%\\_MEIxxxxx on start and deletes it on exit. When the process is stopped
+    abruptly the bootloader cannot finish: Windows will not delete a DLL that is still
+    mapped by a thread that has not unwound yet. The copy is left behind, 25 MB a time,
+    and a server whose daemon is restarted regularly accumulates them silently.
+
+    Three things keep this from deleting something that matters:
+
+    - the marker, so it only ever touches bundles of *this* program;
+    - `keep`, which is the bundle this process is running from;
+    - a rename before the delete. Windows refuses to rename a directory holding an open
+      file, and a live copy always holds several, so a failed rename means "in use" and
+      the directory is left alone. It is also atomic: a partial delete inside a running
+      copy would break it in a way that looks like a corrupt install. Age would not do
+      the same job — a daemon that has been up for a month has a month-old bundle.
+
+    Never raises: a leftover temp directory is not a reason to fail a start (Rule 3).
+    Returns the directories removed, empty when there is nothing to sweep (Rule 1).
+    """
+    root = temp_dir if temp_dir is not None else Path(tempfile.gettempdir())
+    current = keep if keep is not None else _current_bundle()
+    try:
+        candidates = sorted(root.glob(BUNDLE_PREFIX + "*"))
+    except OSError as exc:
+        _log.debug("could not list %s for stale bundles: %s", root, exc)
+        return []
+
+    removed: list[Path] = []
+    for candidate in candidates:
+        if not candidate.is_dir() or _same_path(candidate, current):
+            continue
+        if not (candidate / BUNDLE_MARKER).is_file():
+            continue
+        staged = candidate.with_name(f"{candidate.name}.sweep-{os.getpid()}")
+        try:
+            candidate.rename(staged)
+        except OSError:
+            # In use, or someone else is sweeping it. Either way, not ours to take.
+            continue
+        try:
+            safe_rmtree(staged)
+        except OSError as exc:
+            _log.warning("could not remove stale bundle %s: %s", candidate, exc)
+            continue
+        removed.append(candidate)
+
+    if removed:
+        _log.info(
+            "removed %d unpacked bundle(s) left in %s by an earlier run", len(removed), root
+        )
+    return removed
+
+
+def _current_bundle() -> Path | None:
+    bundle = getattr(sys, "_MEIPASS", None)
+    return Path(bundle) if bundle is not None else None
+
+
+def _same_path(a: Path, b: Path | None) -> bool:
+    if b is None:
+        return False
+    # normcase because Windows paths differ only in case, resolve because _MEIPASS can
+    # arrive with a short (8.3) prefix while the glob yields the long form.
+    return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
 
 
 def _workshop_json(
