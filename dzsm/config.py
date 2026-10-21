@@ -6,6 +6,7 @@ downstream code has to re-check whether a mod name resolves or whether a path is
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import sys
@@ -13,7 +14,14 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 # Steam application ids. The server app and the workshop content live under different
 # ids — workshop mods are published against the *client* app.
@@ -79,8 +87,17 @@ class ConfigError(Exception):
     """Configuration is unusable. Raised at load; never swallowed (Rule 3)."""
 
 
+# A key the models do not know is a typo, and ignoring one is the worst of the three
+# options: `restart_hours` instead of `restart_after_hours` then reads as "the
+# setting had no effect", with nothing anywhere connecting the two. Forbidding
+# extras turns that into a message at load — see _unknown_key_help for the wording.
+STRICT = ConfigDict(extra="forbid")
+
+
 class WorkshopMod(BaseModel):
     """A mod steamcmd downloads and dzsm version-caches."""
+
+    model_config = STRICT
 
     kind: Literal["workshop"] = "workshop"
     workshop_id: int
@@ -91,6 +108,8 @@ class WorkshopMod(BaseModel):
 
 class LocalMod(BaseModel):
     """A mod that lives on disk and is never touched by steamcmd (spec §9)."""
+
+    model_config = STRICT
 
     kind: Literal["local"] = "local"
     path: Path
@@ -107,6 +126,8 @@ class SteamConfig(BaseModel):
     Anonymous login does not work for DayZ: both 223350 and workshop downloads require
     an account that owns the game.
     """
+
+    model_config = STRICT
 
     username: str
     # Name of the env var holding the password. The password itself is never in config.
@@ -140,6 +161,8 @@ class ApiConfig(BaseModel):
     0.0.0.0 unauthenticated would hand that to anyone who can reach the port.
     """
 
+    model_config = STRICT
+
     host: str = "127.0.0.1"
     port: int = 8080
     # Name of the env var holding the API token. Like the Steam password, the token
@@ -157,6 +180,8 @@ class RconConfig(BaseModel):
     Off unless an instance sets `rcon_port` — dzsm will not guess a port, and a wrong
     guess means silently talking to nothing.
     """
+
+    model_config = STRICT
 
     host: str = "127.0.0.1"
     # Name of the env var holding the RCON password. Like every other credential here,
@@ -199,6 +224,8 @@ class RconConfig(BaseModel):
 
 class InstanceConfig(BaseModel):
     """One server instance."""
+
+    model_config = STRICT
 
     port: int = 2302
     config_file: str = "serverDZ.cfg"
@@ -368,6 +395,8 @@ class InstanceConfig(BaseModel):
 
 class Config(BaseModel):
     """Top-level config, loaded from TOML."""
+
+    model_config = STRICT
 
     root: Path
     steam: SteamConfig
@@ -744,4 +773,54 @@ def load_config(path: Path) -> Config:
     try:
         return Config.model_validate(data)
     except ValidationError as exc:
-        raise ConfigError(f"invalid config in {path}:\n{exc}") from exc
+        hint = _unknown_key_help(exc)
+        raise ConfigError(f"invalid config in {path}:\n{hint or exc}") from exc
+
+
+def _unknown_key_help(exc: ValidationError) -> str | None:
+    """Turn pydantic's "Extra inputs are not permitted" into something to act on.
+
+    The default names the location and nothing else, which for a typo is the easy
+    half: the reader already knows where they typed it. This names the key itself,
+    the table it sits in, and the nearest real setting.
+
+    Returns None when the failure is not (only) an unknown key, so a genuine
+    validation error keeps pydantic's own fuller report.
+    """
+    lines = []
+    for error in exc.errors():
+        if error["type"] != "extra_forbidden":
+            return None
+        *table, key = (str(part) for part in error["loc"])
+        # A discriminated union puts its tag in the path, so a bad key under
+        # [mods.CF] reports as [mods.CF.workshop]. That table does not exist in the
+        # file anyone is looking at.
+        if table[:1] == ["mods"] and table[-1:] in (["workshop"], ["local"]):
+            table = table[:-1]
+        where = f"[{'.'.join(table)}]" if table else "the top level"
+        known = _fields_at(table)
+        close = difflib.get_close_matches(key, known, n=1, cutoff=0.6)
+        suggestion = f" Did you mean `{close[0]}`?" if close else ""
+        lines.append(
+            f"unknown setting `{key}` in {where}.{suggestion}\n"
+            f"  valid here: {', '.join(known)}"
+        )
+    return "\n".join(lines) or None
+
+
+def _fields_at(table: list[str]) -> list[str]:
+    """The settings valid inside a config table, by its dotted path."""
+    if not table:
+        return sorted(Config.model_fields)
+    head = table[0]
+    if head == "instances":
+        return sorted(InstanceConfig.model_fields)
+    if head == "mods":
+        return sorted({*WorkshopMod.model_fields, *LocalMod.model_fields})
+    tables: dict[str, type[BaseModel]] = {
+        "steam": SteamConfig,
+        "api": ApiConfig,
+        "rcon": RconConfig,
+    }
+    model = tables.get(head)
+    return sorted(model.model_fields) if model else sorted(Config.model_fields)
