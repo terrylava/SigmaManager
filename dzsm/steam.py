@@ -24,6 +24,8 @@ from typing import Any
 import httpx
 
 from dzsm.config import WORKSHOP_APPID, Config, SteamConfig
+from dzsm.mods import promote_snapshot
+from dzsm.state import State
 
 _log = logging.getLogger(__name__)
 
@@ -516,6 +518,30 @@ def login_interactive(steam: SteamConfig, *, timeout: float | None = None) -> No
             f"{proc.returncode}. Check the output above."
         )
     _log.info("steam: interactive login as %s succeeded; sentry cached", steam.username)
+
+
+def fetch_mod(config: Config, state: State, workshop_id: int) -> int:
+    """Download one mod and promote it into the cache. Returns the version promoted.
+
+    The whole dance in one place: ask the Web API what the current version is, run
+    steamcmd, verify the result (steamcmd exits 0 on failure, so the run is never
+    evidence), and only then promote it to an immutable version directory.
+
+    Raises SteamError if Steam will not say what the version is, and ModCacheError if
+    the download cannot be verified or promoted.
+    """
+    remote = check_updates([workshop_id])
+    version = remote.get(workshop_id)
+    if version is None:
+        raise SteamError(
+            f"Steam did not report a version for mod {workshop_id}; it may have been "
+            f"removed from the Workshop, or made private"
+        )
+    result = download_mod(config, workshop_id)
+    verify_download(config, result)
+    promote_snapshot(config, state, workshop_id, version)
+    state.last_seen_remote[workshop_id] = version
+    return version
 
 
 def download_mod(config: Config, workshop_id: int) -> DownloadResult:

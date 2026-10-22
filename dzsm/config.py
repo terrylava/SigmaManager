@@ -471,6 +471,11 @@ class Config(BaseModel):
     # published. Checking only: one HTTP request, and nothing is ever downloaded or
     # replaced without someone running `dzsm update`. The binary supervising a server
     # does not replace itself because a clock ticked.
+    # Fetch a mod an instance needs but has never had, at that instance's start. Only
+    # when nothing is cached for it: a mod sitting on an older copy runs the old one
+    # rather than making a restart wait on steamcmd (Rule 4).
+    fetch_missing_mods: bool = True
+
     check_for_updates: bool = True
 
     # Where releases are looked for. Here rather than hardcoded so a fork updates from

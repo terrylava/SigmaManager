@@ -766,6 +766,36 @@ def _workshop_id_of(config: Config, mod_name: str) -> int | None:
     return mod.workshop_id if isinstance(mod, WorkshopMod) else None
 
 
+def uncached_mods(config: Config, state: State, instance_name: str) -> dict[str, int]:
+    """Workshop mods this instance needs that have NO version on disk at all.
+
+    Name -> workshop id, in load order. Deliberately not "is there a newer version":
+    an instance with an older copy can run, and making a restart wait on a download
+    would break Rule 4. This is the other case — nothing to launch at all.
+
+    A mod pinned to a version that is not cached counts, since that pin is what the
+    instance would have to run.
+
+    Returns a dict, empty when everything is present — never None (Rule 1).
+    """
+    instance = config.instances[instance_name]
+    missing: dict[str, int] = {}
+    for mod_name in [*instance.mods, *instance.server_mods]:
+        mod = config.mods.get(mod_name)
+        if not isinstance(mod, WorkshopMod):
+            continue
+        if mod.pinned_version is not None:
+            if not config.version_dir(mod.workshop_id, mod.pinned_version).is_dir():
+                missing[mod_name] = mod.workshop_id
+            continue
+        if not any(
+            config.version_dir(mod.workshop_id, version).is_dir()
+            for version in state.known_versions(mod.workshop_id)
+        ):
+            missing[mod_name] = mod.workshop_id
+    return missing
+
+
 def resolve_mod_versions(config: Config, state: State, instance_name: str) -> dict[str, int]:
     """Workshop mod name -> the version this instance should activate at its next start.
 

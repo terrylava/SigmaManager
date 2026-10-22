@@ -23,7 +23,7 @@ from pathlib import Path
 
 import psutil
 
-from dzsm.config import Config, ConfigError, InstanceConfig, load_config
+from dzsm.config import Config, ConfigError, InstanceConfig, WorkshopMod, load_config
 from dzsm.instance import (
     COMMAND_LINE_LIMIT,
     battleye_config_path,
@@ -40,9 +40,16 @@ from dzsm.instance import (
     server_executable,
     sync_keys,
 )
-from dzsm.mods import ModCacheError, mod_paths, resolve_mod_versions, server_mod_paths
+from dzsm.mods import (
+    ModCacheError,
+    mod_paths,
+    resolve_mod_versions,
+    server_mod_paths,
+    uncached_mods,
+)
 from dzsm.rcon import RconClient, RconError
 from dzsm.state import ProcessInfo, State, StateError, load_state, save_state
+from dzsm.steam import SteamError, fetch_mod
 
 _log = logging.getLogger(__name__)
 
@@ -88,8 +95,14 @@ def start(
     if rcon_port is not None:
         ensure_battleye_config(config, instance_name, rcon_port)
 
-    versions = versions_to_activate(config, state, instance_name)
+    if config.fetch_missing_mods:
+        _fetch_missing_mods(config, state, instance_name)
+
     try:
+        # Inside the same guard as the paths below: resolution raises the same error
+        # type, and a caller catching RunnerError for one and not the other is the kind
+        # of gap that only shows up when a mod is genuinely unavailable.
+        versions = versions_to_activate(config, state, instance_name)
         paths = mod_paths(config, instance_name, versions)
         server_paths = server_mod_paths(config, instance_name, versions)
     except ModCacheError as exc:
@@ -487,6 +500,57 @@ def _reload(config: Config, current: State) -> State:
 # --- internals ---------------------------------------------------------------
 
 
+def _fetch_missing_mods(config: Config, state: State, instance_name: str) -> list[str]:
+    """Download mods this instance has never had a copy of, before it tries to launch.
+
+    Adding a mod to a server and pressing Start is one action in someone's head, and it
+    used to be two: the start refused with "has no cached version — run `dzsm mods
+    update`", which says what to do but makes the person do it, from a terminal, for
+    something they had just asked for in the browser.
+
+    Only mods with *nothing* cached. A mod sitting on an older version is left alone:
+    the instance can run it, and making a restart wait on steamcmd is exactly what Rule
+    4 forbids. This is the other case, where there is nothing to launch at all.
+
+    A failure is logged and allowed through, because the error that follows from
+    mod_paths names the mod and the path, which is more use to the reader than a
+    steamcmd transcript. The start fails either way — the instance genuinely cannot run.
+
+    Returns the names fetched, empty when there was nothing to do (Rule 1).
+    """
+    missing = uncached_mods(config, state, instance_name)
+    if not missing:
+        return []
+
+    _log.info(
+        "instance %s: %d mod(s) have never been downloaded (%s); fetching before start",
+        instance_name,
+        len(missing),
+        ", ".join(missing),
+    )
+    fetched: list[str] = []
+    for mod_name, workshop_id in missing.items():
+        try:
+            version = fetch_mod(config, state, workshop_id)
+        except (SteamError, ModCacheError) as exc:
+            # Loudly, with the mod named, and on to the next: one unavailable mod should
+            # not hide the fact that a second one is missing too (Rule 3).
+            _log.error(
+                "instance %s: could not fetch mod %s (%s): %s",
+                instance_name,
+                mod_name,
+                workshop_id,
+                exc,
+            )
+            continue
+        _log.info("instance %s: fetched %s version %s", instance_name, mod_name, version)
+        fetched.append(mod_name)
+
+    if fetched:
+        save_state(config.state_file, state)
+    return fetched
+
+
 def versions_to_activate(config: Config, state: State, instance_name: str) -> dict[str, int]:
     """Versions for this start, falling back to the existing pins (Rule 4).
 
@@ -507,6 +571,20 @@ def versions_to_activate(config: Config, state: State, instance_name: str) -> di
         instance = config.instances[instance_name]
         referenced = {*instance.mods, *instance.server_mods}
         fallback = {name: version for name, version in previous.items() if name in referenced}
+
+        # Rule 4 is "keep the instance on its old version", not "start it without a mod
+        # it needs". A mod that has never been cached is not in the pins either, so the
+        # fallback would launch a modded server missing one — which every client would
+        # be kicked from anyway, and the error for it ("no version resolved") says far
+        # less than the one being swallowed here. Found by adding a mod to a live config
+        # and starting: the useful message was replaced by a useless one.
+        wanted = {
+            name
+            for name in referenced
+            if isinstance(config.mods.get(name), WorkshopMod)
+        }
+        if wanted - set(fallback):
+            raise
 
         _log.error(
             "instance %s: could not resolve current mod versions (%s); starting on the "
