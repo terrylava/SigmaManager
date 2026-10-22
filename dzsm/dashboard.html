@@ -437,6 +437,27 @@ const actions = {
 
   // --- a server's mods ---
 
+  kick: async d => {
+    const reason = prompt('Kick ' + d.player + ' - reason (optional):');
+    if (reason === null) return;
+    await send('POST', 'api/instances/' + encodeURIComponent(d.name) + '/kick',
+               {number: +d.number, reason: reason}, 'Kicked ' + d.player);
+  },
+
+  ban: async d => {
+    // Minutes, because a permanent ban asked for by a mis-click is the worst outcome
+    // here and typing a number is a moment's thought. Empty means permanent, which is
+    // BattlEye's own convention for 0.
+    const minutes = prompt('Ban ' + d.player + ' for how many minutes? '
+                           + '(blank = permanent)', '60');
+    if (minutes === null) return;
+    const reason = prompt('Reason (optional):');
+    if (reason === null) return;
+    await send('POST', 'api/instances/' + encodeURIComponent(d.name) + '/ban',
+               {number: +d.number, minutes: +minutes || 0, reason: reason},
+               'Banned ' + d.player);
+  },
+
   instAddMod: async d => {
     const mod = val('add-mod');
     if (!mod) { say('pick a mod to add', true); return; }
@@ -1073,6 +1094,15 @@ function playersPanel(i) {
           + '<td><span class="note">' + esc(s.ip) + '</span>'
           + '<td>' + (s.lobby ? '<span class="warn">loading</span>' : '')
             + (s.verified ? '' : ' <span class="warn">unverified</span>')
+          // The slot number, not the name: BattlEye addresses players by slot, and it
+          // reuses them as people leave. These come from the list being displayed,
+          // which the poll loop refreshes.
+          + '<td><button data-act="kick"' + attr('data-name', i.name)
+            + attr('data-number', s.number) + attr('data-player', s.name)
+            + (busy ? ' disabled' : '') + '>Kick</button>'
+            + '<button class="danger" data-act="ban"' + attr('data-name', i.name)
+            + attr('data-number', s.number) + attr('data-player', s.name)
+            + (busy ? ' disabled' : '') + '>Ban</button>'
           + '</tr>').join('')
       + '</table>';
   }

@@ -373,6 +373,38 @@ class _Pending:
         self.done.set()
 
 
+BANS_COMMAND = "bans"
+
+
+def kick_command(player_number: int, reason: str = "") -> str:
+    """Disconnect one player. They can come straight back.
+
+    Addressed by the slot number BattlEye is using *now*, and it reuses those as people
+    leave — so a number read from a stale list can reach the wrong person. Callers
+    should be acting on a list they have just fetched.
+    """
+    return f"kick {player_number} {reason}".rstrip()
+
+
+def ban_command(player_number: int, minutes: int = 0, reason: str = "") -> str:
+    """Ban a connected player by slot. 0 minutes is permanent, BattlEye's convention.
+
+    The ban is recorded against their GUID, not their IP, so this does not turn the live
+    view's addresses into anything durable — the rule that IPs are shown and never
+    persisted still holds.
+    """
+    return f"ban {player_number} {minutes} {reason}".rstrip()
+
+
+def unban_command(ban_id: int) -> str:
+    """Remove one ban by the number `bans` gives it.
+
+    Those numbers are positions in the list and shift when anything is removed, so the
+    caller should be acting on a listing it has just read.
+    """
+    return f"removeBan {ban_id}"
+
+
 def parse_players(text: str) -> list[PlayerSlot]:
     """Parse the `players` command's table.
 
@@ -547,6 +579,22 @@ class RconClient:
         ping. Returns a list — empty for an empty server, never None (Rule 1).
         """
         return parse_players(self.command("players"))
+
+    def kick(self, player_number: int, reason: str = "") -> str:
+        """Disconnect one player. They can come straight back."""
+        return self.command(kick_command(player_number, reason))
+
+    def ban(self, player_number: int, minutes: int = 0, reason: str = "") -> str:
+        """Ban a connected player by slot, and disconnect them."""
+        return self.command(ban_command(player_number, minutes, reason))
+
+    def bans(self) -> str:
+        """BattlEye's ban list, as it prints it."""
+        return self.command(BANS_COMMAND)
+
+    def unban(self, ban_id: int) -> str:
+        """Remove one ban by the number `bans` gives it."""
+        return self.command(unban_command(ban_id))
 
     def shutdown(self) -> None:
         """Ask the server to stop.

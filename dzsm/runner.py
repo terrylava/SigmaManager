@@ -23,7 +23,7 @@ from pathlib import Path
 
 import psutil
 
-from dzsm import backup
+from dzsm import backup, notify
 from dzsm.config import Config, ConfigError, InstanceConfig, WorkshopMod, load_config
 from dzsm.instance import (
     COMMAND_LINE_LIMIT,
@@ -473,6 +473,9 @@ def supervise(
                 # Crash restart. Activation runs again here, so a mod that finished
                 # downloading since the last start is picked up now.
                 _log.warning("instance %s: process gone, restarting", name)
+                notify.post(
+                    config, "crash", f"**{name}** stopped unexpectedly. Restarting it."
+                )
                 _note_failure(config, state, name, "process gone")
                 _start_and_save(config, state, name, reason="crash restart")
                 warned.pop(name, None)
@@ -553,6 +556,12 @@ def _fetch_missing_mods(config: Config, state: State, instance_name: str) -> lis
                 mod_name,
                 workshop_id,
                 exc,
+            )
+            notify.post(
+                config,
+                "mod_fetch_failed",
+                f"**{instance_name}** needs mod `{mod_name}` ({workshop_id}) and it "
+                f"could not be downloaded, so the server will not start.\n`{exc}`",
             )
             continue
         _log.info("instance %s: fetched %s version %s", instance_name, mod_name, version)
@@ -993,6 +1002,13 @@ def _may_restart(config: Config, state: State, instance_name: str, now: datetime
                 failure.last_error or "unknown",
                 instance_name,
             )
+            notify.post(
+                config,
+                "gave_up",
+                f"**{instance_name}** has failed to start {failure.count} times and "
+                f"dzsm has stopped trying.\nLast error: `{failure.last_error or 'unknown'}`\n"
+                f"Run `dzsm instance start {instance_name}` once it is fixed.",
+            )
             failure.count += 1
             _save(config, state)
         return False
@@ -1049,11 +1065,18 @@ def _roll_back(config: Config, state: State, instance_name: str) -> None:
         for name, version in good.items()
         if current.get(name) != version
     }
+    summary = ", ".join(f"{n}: {was} -> {to}" for n, (was, to) in changed.items())
     _log.error(
         "instance %s: failed twice since its mod versions changed; going back to the "
         "versions it last stayed up on (%s)",
         instance_name,
-        ", ".join(f"{n}: {was} -> {to}" for n, (was, to) in changed.items()),
+        summary,
+    )
+    notify.post(
+        config,
+        "rollback",
+        f"**{instance_name}** failed twice since its mods changed. Going back to the "
+        f"versions it last stayed up on: `{summary}`",
     )
     state.forced_versions[instance_name] = dict(good)
 
@@ -1127,6 +1150,12 @@ def _backup_between(config: Config, state: State, instance_name: str) -> None:
         backup.take(config, state, instance_name)
     except backup.BackupError as exc:
         _log.error("instance %s: backup before restart failed: %s", instance_name, exc)
+        notify.post(
+            config,
+            "backup_failed",
+            f"**{instance_name}**: the world could not be backed up before its "
+            f"restart.\n`{exc}`",
+        )
 
 
 def _save(config: Config, state: State) -> None:

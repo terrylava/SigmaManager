@@ -176,6 +176,48 @@ class ApiConfig(BaseModel):
         return os.environ.get(self.token_env) or None
 
 
+class NotifyConfig(BaseModel):
+    """Where to announce things, so nobody has to be watching the dashboard."""
+
+    model_config = STRICT
+
+    # The environment variable holding the webhook URL. The URL itself never goes in
+    # config.toml: anyone holding it can post as the server, and config files get pasted
+    # into forum posts when people ask for help. Same rule as the Steam password.
+    webhook_url_env: str = "DZSM_WEBHOOK_URL"
+
+    # Which events to send. Names come from notify.EVENTS; an unknown one is refused at
+    # config load rather than silently never firing.
+    events: list[str] = Field(
+        default_factory=lambda: [
+            "crash",
+            "gave_up",
+            "rollback",
+            "mod_fetch_failed",
+            "game_update",
+            "dzsm_update",
+            "backup_failed",
+        ]
+    )
+
+    # Short on purpose. This is called from the supervision loop, and a webhook that has
+    # gone away must not hold up crash detection for every other instance.
+    timeout_seconds: float = 5.0
+
+    @field_validator("events")
+    @classmethod
+    def _events_are_known(cls, value: list[str]) -> list[str]:
+        from dzsm.notify import EVENTS
+
+        unknown = [name for name in value if name not in EVENTS]
+        if unknown:
+            raise ValueError(
+                f"unknown notify event(s): {', '.join(unknown)}. "
+                f"One of: {', '.join(EVENTS)}"
+            )
+        return value
+
+
 class RconConfig(BaseModel):
     """BattlEye RCON, used for restart warnings and admin chat.
 
@@ -406,6 +448,7 @@ class Config(BaseModel):
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
     api: ApiConfig = Field(default_factory=ApiConfig)
     rcon: RconConfig = Field(default_factory=RconConfig)
+    notify: NotifyConfig = Field(default_factory=NotifyConfig)
     # Optional retention window, in days. None (the default) means nothing is ever
     # deleted automatically — versions accumulate until someone removes one. Setting a
     # number opts in to automatic pruning of versions that are unused, not the newest for
@@ -869,6 +912,7 @@ def _fields_at(table: list[str]) -> list[str]:
         "steam": SteamConfig,
         "api": ApiConfig,
         "rcon": RconConfig,
+        "notify": NotifyConfig,
     }
     model = tables.get(head)
     return sorted(model.model_fields) if model else sorted(Config.model_fields)

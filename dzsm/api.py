@@ -48,7 +48,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from dzsm import __version__, players, runner, settings
+from dzsm import __version__, notify, players, runner, settings
 from dzsm import instance as instance_mod
 from dzsm.config import Config, WorkshopMod, load_config
 from dzsm.instance import DEFAULT_TERRAIN, InstanceError, prune_logs
@@ -65,7 +65,17 @@ from dzsm.mods import (
     unused_mods,
     version_status,
 )
-from dzsm.rcon import PlayerSlot, RconError, RconEvent, RconSession, parse_players
+from dzsm.rcon import (
+    BANS_COMMAND,
+    PlayerSlot,
+    RconError,
+    RconEvent,
+    RconSession,
+    ban_command,
+    kick_command,
+    parse_players,
+    unban_command,
+)
 from dzsm.selfupdate import SelfUpdateError, is_newer, latest_release
 from dzsm.state import State, StateError, load_state, save_state
 from dzsm.steam import (
@@ -138,6 +148,31 @@ class NewInstance(BaseModel):
     # second server: the same mods on a different map.
     copy_mods_from: str | None = None
     mission_source: str | None = None
+
+
+class KickRequest(BaseModel):
+    """Disconnect one player."""
+
+    # BattlEye's slot number, as the live player list shows it. It reuses these as
+    # people leave, so one taken from a stale list can reach the wrong person — callers
+    # should be acting on a list they have just read.
+    number: int
+    reason: str = ""
+
+
+class BanRequest(BaseModel):
+    """Ban a connected player."""
+
+    number: int
+    # 0 is permanent, which is BattlEye's own convention rather than ours.
+    minutes: int = 0
+    reason: str = ""
+
+
+class UnbanRequest(BaseModel):
+    """Lift one ban, by its position in BattlEye's list."""
+
+    ban_id: int
 
 
 class ChatMessage(BaseModel):
@@ -352,6 +387,7 @@ def _check_for_release(config: Config) -> str | None:
         return None
 
     state = load_state(config.state_file)
+    previous = state.latest_release_tag
     state.latest_release_tag = release.tag
     state.release_checked_at = datetime.now(UTC)
     try:
@@ -360,11 +396,19 @@ def _check_for_release(config: Config) -> str | None:
         _log.error("could not record the release check: %s", exc)
         return None
 
-    if is_newer(release.tag, __version__):
+    if is_newer(release.tag, __version__) and release.tag != previous:
         _log.info(
             "dzsm %s is available (running %s) — run `dzsm update` to fetch it",
             release.tag,
             __version__,
+        )
+        # Only when the tag is one we have not announced: this runs every half hour, and
+        # a line repeated 48 times a day is noise someone learns to ignore.
+        notify.post(
+            config,
+            "dzsm_update",
+            f"dzsm **{release.tag}** is available (running {__version__}). "
+            f"Run `dzsm update` on the server.",
         )
     return release.tag
 
@@ -489,6 +533,41 @@ class SessionRegistry:
 PERSISTED_EVENTS = frozenset({"chat", "connect", "disconnect", "kick"})
 
 
+def _rcon_command(
+    config: Config, sessions: SessionRegistry, name: str, command: str
+) -> str:
+    """Run one RCON command against an instance, and say plainly when it cannot.
+
+    The held session first, for the same reason the players route checks it first: it is
+    already connected and has proven it answers, so the startup grace does not apply to
+    it. Falling through to a one-shot client is what makes this work for an instance the
+    registry has not picked up yet, or one whose session has dropped.
+    """
+    state = load_state(config.state_file)
+    session = sessions.get(name)
+    if session is not None and session.status().connected:
+        try:
+            return session.send(command)
+        except RconError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not runner.is_running(config, state, name):
+        raise HTTPException(status_code=409, detail=f"instance {name!r} is not running")
+
+    try:
+        client = runner.rcon_client(config, name)
+    except RconError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if client is None:
+        raise HTTPException(status_code=409, detail=f"instance {name!r} has RCON off")
+    try:
+        return client.command(command)
+    except RconError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    finally:
+        client.close()
+
+
 def _players_json(name: str, slots: list[PlayerSlot]) -> dict[str, Any]:
     return {
         "instance": name,
@@ -548,6 +627,7 @@ def _check_server_build(config: Config, jobs: JobRegistry) -> None:
         jobs.finish(job.id, ok=False, detail=str(exc))
         return
 
+    previously_seen = state.latest_remote_server_build
     state.latest_remote_server_build = remote
     state.server_build_checked_at = datetime.now(UTC)
     _note_steam_session(config, state, None)
@@ -563,6 +643,17 @@ def _check_server_build(config: Config, jobs: JobRegistry) -> None:
             else f"server build {remote} is current"
         ),
     )
+
+    if behind and remote != previously_seen:
+        # Once per build, not once per check: clients update themselves, so a server on
+        # the old build stops accepting them — worth a message, not worth 48 a day.
+        notify.post(
+            config,
+            "game_update",
+            f"DayZ build **{remote}** is out (this install has "
+            f"{state.serverapp_version or 'none'}). Clients update themselves, so "
+            f"servers on the old build will refuse them.",
+        )
 
     if behind and config.server_update_auto_download:
         download = jobs.create("server.update")
@@ -982,6 +1073,40 @@ def create_app(config_path: Path) -> FastAPI:
             client.close()
 
         return _players_json(name, slots)
+
+    @app.post("/api/instances/{name}/kick", dependencies=writes)
+    def kick_player(name: str, body: KickRequest) -> dict[str, Any]:
+        """Disconnect one player. They can come straight back."""
+        _known_instance(config, name)
+        reply = _rcon_command(
+            config, sessions, name, kick_command(body.number, body.reason)
+        )
+        return {"instance": name, "number": body.number, "reply": reply}
+
+    @app.post("/api/instances/{name}/ban", dependencies=writes)
+    def ban_player(name: str, body: BanRequest) -> dict[str, Any]:
+        """Ban a connected player and disconnect them. 0 minutes is permanent."""
+        _known_instance(config, name)
+        reply = _rcon_command(
+            config, sessions, name, ban_command(body.number, body.minutes, body.reason)
+        )
+        return {"instance": name, "number": body.number, "reply": reply}
+
+    @app.get("/api/instances/{name}/bans", dependencies=writes)
+    def list_bans(name: str) -> dict[str, Any]:
+        """BattlEye's ban list. Token-gated: it is personal data about third parties."""
+        _known_instance(config, name)
+        return {
+            "instance": name,
+            "bans": _rcon_command(config, sessions, name, BANS_COMMAND),
+        }
+
+    @app.post("/api/instances/{name}/unban", dependencies=writes)
+    def unban_player(name: str, body: UnbanRequest) -> dict[str, Any]:
+        """Remove one ban by the number the list gives it."""
+        _known_instance(config, name)
+        reply = _rcon_command(config, sessions, name, unban_command(body.ban_id))
+        return {"instance": name, "ban_id": body.ban_id, "reply": reply}
 
     @app.get("/api/instances/{name}/feed", dependencies=writes)
     def instance_feed(name: str, after: int = 0, history: int = 0) -> dict[str, Any]:

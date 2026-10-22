@@ -122,26 +122,77 @@ def test_reads_are_open_even_when_a_token_is_set(secured: TestClient) -> None:
 # --- write gating ------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("post", "/api/instances/chernarus/start"),
-        ("post", "/api/instances/chernarus/stop"),
-        ("post", "/api/instances/chernarus/restart"),
-        ("patch", "/api/instances/chernarus/settings"),
-        ("post", "/api/mods/check"),
-        ("post", "/api/mods/update"),
-        ("post", "/api/server/update"),
-        ("delete", f"/api/versions/{WORKSHOP_ID}/{VERSION}"),
-        ("delete", f"/api/mods/{WORKSHOP_ID}"),
-    ],
-)
+# Every mutating route, by hand. test_the_list_above_covers_every_write_route is what
+# keeps it honest against the app.
+WRITE_ROUTES = [
+    ("post", "/api/instances"),
+    ("post", "/api/instances/chernarus/start"),
+    ("post", "/api/instances/chernarus/stop"),
+    ("post", "/api/instances/chernarus/restart"),
+    ("post", "/api/instances/chernarus/say"),
+    ("post", "/api/instances/chernarus/kick"),
+    ("post", "/api/instances/chernarus/ban"),
+    ("post", "/api/instances/chernarus/unban"),
+    ("patch", "/api/instances/chernarus/settings"),
+    ("put", "/api/instances/chernarus/serverdz"),
+    ("put", "/api/instances/chernarus/mods/CF"),
+    ("delete", "/api/instances/chernarus/mods/CF"),
+    ("post", "/api/instances/chernarus/mods/CF/localize"),
+    ("put", "/api/config"),
+    ("patch", "/api/config/global"),
+    ("patch", "/api/config/mods/CF/instances"),
+    ("post", "/api/config/mods/CF/localize"),
+    ("delete", "/api/config/mods/CF"),
+    ("post", "/api/mods/check"),
+    ("post", "/api/mods/update"),
+    ("post", "/api/server/update"),
+    ("post", "/api/steam/verify"),
+    ("post", "/api/players/ingest"),
+    ("post", "/api/localmods/add"),
+    ("post", f"/api/workshop/{WORKSHOP_ID}/add"),
+    ("delete", f"/api/versions/{WORKSHOP_ID}/{VERSION}"),
+    ("delete", f"/api/mods/{WORKSHOP_ID}"),
+]
+
+
+@pytest.mark.parametrize(("method", "path"), WRITE_ROUTES)
 def test_every_write_route_requires_the_token(
     secured: TestClient, method: str, path: str
 ) -> None:
     """The list is exhaustive on purpose: a new write route added without the dependency
     should fail this test rather than ship unauthenticated."""
     assert getattr(secured, method)(path).status_code == 401
+
+
+def test_the_list_above_covers_every_write_route(secured: TestClient) -> None:
+    """And this is what makes that docstring true.
+
+    The list is written by hand, so until this existed nothing noticed a new POST that
+    was never added to it — the guard only re-checked routes somebody had already
+    thought about. Three routes went in at once and it stayed green.
+
+    Compares by shape, not by the exact path: the parametrised cases use real ids, and
+    the routes they exercise are templates.
+    """
+    covered = {(method, _shape(path)) for method, path in WRITE_ROUTES}
+    served = {
+        (method.lower(), _shape(route.path))
+        for route in secured.app.routes  # type: ignore[attr-defined]
+        for method in getattr(route, "methods", set())
+        if method in {"POST", "PUT", "PATCH", "DELETE"}
+    }
+
+    assert served - covered == set(), "write route(s) not checked for the token"
+
+
+def _shape(path: str) -> str:
+    """A path with its variable parts replaced, so a real id matches its template."""
+    variable = {"chernarus", "CF", str(WORKSHOP_ID), str(VERSION)}
+    parts = [
+        "*" if part.startswith("{") or part in variable else part
+        for part in path.strip("/").split("/")
+    ]
+    return "/".join(parts)
 
 
 def test_wrong_token_is_rejected(secured: TestClient) -> None:
