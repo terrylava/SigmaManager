@@ -476,6 +476,16 @@ class Config(BaseModel):
     # rather than making a restart wait on steamcmd (Rule 4).
     fetch_missing_mods: bool = True
 
+    # Copy an instance's world during the restart window dzsm already owns. That is the
+    # one moment it is certainly consistent: DayZ writes persistence continuously, so a
+    # copy taken from a running server can catch a record mid-write.
+    backup_on_restart: bool = True
+
+    # How many copies to keep per instance. 0 keeps every one: a retention number nobody
+    # has thought about must not be the thing that deletes someone's last copy, which is
+    # the same stance gc_retention_days takes.
+    backup_keep: int = 7
+
     check_for_updates: bool = True
 
     # Where releases are looked for. Here rather than hardcoded so a fork updates from

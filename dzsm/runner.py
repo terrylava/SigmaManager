@@ -23,6 +23,7 @@ from pathlib import Path
 
 import psutil
 
+from dzsm import backup
 from dzsm.config import Config, ConfigError, InstanceConfig, WorkshopMod, load_config
 from dzsm.instance import (
     COMMAND_LINE_LIMIT,
@@ -928,7 +929,24 @@ def _restart_and_save(config: Config, state: State, instance_name: str) -> None:
         stop(config, state, instance_name, hold=False)
     except (RunnerError, psutil.Error) as exc:
         _log.error("instance %s: stop failed during restart: %s", instance_name, exc)
+    _backup_between(config, state, instance_name)
     _start_and_save(config, state, instance_name, reason="scheduled restart")
+
+
+def _backup_between(config: Config, state: State, instance_name: str) -> None:
+    """Copy the world while the server is down, which is the only time it is certainly
+    consistent — DayZ writes persistence continuously, so a copy taken from a running
+    one can catch a record mid-write.
+
+    Never allowed to stop the restart (Rule 4). A world that was not backed up is a
+    worry; a server that stayed down because of a failed copy is an outage.
+    """
+    if not config.backup_on_restart:
+        return
+    try:
+        backup.take(config, state, instance_name)
+    except backup.BackupError as exc:
+        _log.error("instance %s: backup before restart failed: %s", instance_name, exc)
 
 
 def _save(config: Config, state: State) -> None:

@@ -16,6 +16,7 @@ from typing import Annotated, Any, NoReturn, Optional
 import typer
 
 from dzsm import __version__, deployment, mods, players, runner, selfupdate
+from dzsm import backup as dzsm_backup
 from dzsm import instance as dzsm_instance
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
@@ -1110,6 +1111,100 @@ def update(
     typer.secho(f"Installed {release.tag} as {binary}.", fg=typer.colors.GREEN)
     typer.echo(f"The previous build is {retired}.")
     typer.echo("Restart dzsm for it to take effect - this process keeps the old one.")
+
+
+backup_app = typer.Typer(
+    name="backup",
+    help="Copies of an instance's world: bases, stashes, vehicles, economy.",
+    no_args_is_help=True,
+)
+app.add_typer(backup_app)
+
+
+@backup_app.command("take")
+def backup_take(
+    name: str,
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """Back up one instance's world now.
+
+    Taken from the running server if it is up, which DayZ does not guarantee is
+    consistent — it writes persistence continuously. The copies worth trusting are the
+    ones taken in the restart window, which happens on its own when backup_on_restart
+    is left on. This is for before you do something risky.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    if name not in cfg.instances:
+        raise typer.BadParameter(f"unknown instance {name!r}")
+    if runner.is_running(cfg, state, name):
+        typer.secho(
+            "the server is running, so persistence may be mid-write; stop it first for "
+            "a copy you can rely on",
+            fg=typer.colors.YELLOW,
+        )
+
+    try:
+        taken = dzsm_backup.take(cfg, state, name)
+    except dzsm_backup.BackupError as exc:
+        _fail(exc)
+    if taken is None:
+        typer.echo(f"{name} has no mission directory yet, so there is nothing to copy.")
+        return
+    size = f"{taken.size_bytes / (1024 * 1024):.1f} MiB"
+    typer.secho(f"{taken.stamp}  {size}  {taken.path}", fg=typer.colors.GREEN)
+
+
+@backup_app.command("list")
+def backup_list(
+    name: str,
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """Show stored copies, newest first."""
+    cfg = _load_config(config_path)
+    if name not in cfg.instances:
+        raise typer.BadParameter(f"unknown instance {name!r}")
+
+    stored = dzsm_backup.list_backups(cfg, name)
+    if not stored:
+        typer.echo(f"no backups for {name}")
+        return
+    for item in stored:
+        size = f"{item.size_bytes / (1024 * 1024):.1f} MiB"
+        typer.echo(f"{item.stamp:<18} {size:>12}  {item.mission}")
+
+
+@backup_app.command("restore")
+def backup_restore(
+    name: str,
+    stamp: str,
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """Put a stored world back, replacing the current one.
+
+    Refuses while the instance is running: a live server holds its persistence open, so
+    this would half-apply and leave a world that is neither. The current world is backed
+    up first, because restoring the wrong copy is an easy mistake and otherwise an
+    unrecoverable one.
+    """
+    cfg = _load_config(config_path)
+    state = _load_state(cfg)
+    if name not in cfg.instances:
+        raise typer.BadParameter(f"unknown instance {name!r}")
+    if runner.is_running(cfg, state, name):
+        _fail(
+            dzsm_backup.BackupError(
+                f"instance {name!r} is running. Stop it first — a live server holds its "
+                f"persistence open, and a half-applied restore is worse than none."
+            )
+        )
+
+    try:
+        restored = dzsm_backup.restore(cfg, state, name, stamp)
+    except dzsm_backup.BackupError as exc:
+        _fail(exc)
+    typer.secho(f"restored {stamp} into {restored}", fg=typer.colors.GREEN)
+    typer.echo("The world that was there has been kept as a new backup.")
 
 
 DeployDir = Annotated[
