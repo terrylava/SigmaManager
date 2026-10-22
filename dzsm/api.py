@@ -48,8 +48,8 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from dzsm import __version__, players, runner, settings
 from dzsm import instance as instance_mod
-from dzsm import players, runner, settings
 from dzsm.config import Config, WorkshopMod, load_config
 from dzsm.instance import DEFAULT_TERRAIN, InstanceError
 from dzsm.mods import (
@@ -66,7 +66,8 @@ from dzsm.mods import (
     version_status,
 )
 from dzsm.rcon import PlayerSlot, RconError, RconEvent, RconSession, parse_players
-from dzsm.state import State, load_state, save_state
+from dzsm.selfupdate import SelfUpdateError, is_newer, latest_release
+from dzsm.state import State, StateError, load_state, save_state
 from dzsm.steam import (
     RANKINGS,
     WORKSHOP_TAGS,
@@ -297,10 +298,51 @@ def _auto_check(
         if config.check_server_build:
             _check_server_build(config, jobs)
 
+        # Last, and never fatal: this one talks to GitHub rather than Steam, so it
+        # must not be able to stop the checks people actually depend on.
+        if config.check_for_updates:
+            _check_for_release(config)
+
         # Folded into the same housekeeping tick rather than the supervision loop: the
         # open admin log grows continuously while anyone is connected, and re-parsing it
         # every 15s to learn nothing would be pure waste.
         _ingest_sessions(config)
+
+
+def _check_for_release(config: Config) -> str | None:
+    """Ask GitHub for the newest dzsm and record it. Returns the tag, or None.
+
+    Checking only. Nothing is downloaded and nothing is replaced — that takes someone
+    running `dzsm update`, because a binary that supervises game servers should not swap
+    itself out unattended.
+
+    Never raises: GitHub being unreachable, or rate-limiting an unauthenticated caller,
+    is not a reason for the housekeeping tick to stop doing anything else (Rule 3).
+    """
+    try:
+        release = latest_release(repo=config.update_repo)
+    except SelfUpdateError as exc:
+        _log.warning("update check: %s", exc)
+        return None
+    if release is None:
+        return None
+
+    state = load_state(config.state_file)
+    state.latest_release_tag = release.tag
+    state.release_checked_at = datetime.now(UTC)
+    try:
+        save_state(config.state_file, state)
+    except StateError as exc:
+        _log.error("could not record the release check: %s", exc)
+        return None
+
+    if is_newer(release.tag, __version__):
+        _log.info(
+            "dzsm %s is available (running %s) — run `dzsm update` to fetch it",
+            release.tag,
+            __version__,
+        )
+    return release.tag
 
 
 RECONCILE_SECONDS = 10.0
@@ -1109,9 +1151,27 @@ def create_app(config_path: Path) -> FastAPI:
             and remote_build is not None
             and instance.server_build != remote_build
         )
+        latest_tag = state.latest_release_tag
         return {
             "last_checked": state.last_checked_at.isoformat() if state.last_checked_at else None,
             "interval_minutes": config.mod_check_interval_minutes,
+            # dzsm itself. Reported, never acted on: `dzsm update` is a person's call.
+            "dzsm": {
+                "checking": config.check_for_updates,
+                "running": __version__,
+                "latest": latest_tag,
+                "update_available": bool(latest_tag and is_newer(latest_tag, __version__)),
+                "checked_at": (
+                    state.release_checked_at.isoformat()
+                    if state.release_checked_at
+                    else None
+                ),
+                "notes_url": (
+                    f"https://github.com/{config.update_repo}/releases/latest"
+                    if latest_tag
+                    else None
+                ),
+            },
             "auto_download": config.mod_check_auto_download,
             "available": sorted(behind),
             "server": {

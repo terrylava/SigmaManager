@@ -15,7 +15,7 @@ from typing import Annotated, Any, NoReturn, Optional
 
 import typer
 
-from dzsm import __version__, deployment, mods, players, runner
+from dzsm import __version__, deployment, mods, players, runner, selfupdate
 from dzsm import instance as dzsm_instance
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
@@ -1040,6 +1040,76 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
         typer.echo(f"{name:<16} {marker:<18} port {instance.port}  {rcon}  next {when}")
         typer.echo(f"{'':<16} server {build}")
         typer.echo(f"{'':<16} {versions}")
+
+
+@app.command()
+def update(
+    check: Annotated[
+        bool, typer.Option("--check", help="Say what is available and stop.")
+    ] = False,
+    config_path: ConfigPath = Path("config.toml"),
+) -> None:
+    """Fetch the newest published dzsm and put it in place.
+
+    Nothing is downloaded until you run this. The daemon's own check only looks, because
+    a binary supervising someone's game servers has no business replacing itself on a
+    timer.
+
+    The running program keeps the image it already loaded, so this never interrupts
+    anything: the new binary takes effect the next time dzsm starts. The one it replaces
+    is kept alongside as dzsm.exe.old in case the new one disappoints.
+    """
+    repo = selfupdate.DEFAULT_REPO
+    if config_path.exists():
+        # Only to learn which repository to ask. An update must still be possible on a
+        # machine whose config will not load - that is one of the reasons to update.
+        try:
+            repo = _load_config(config_path).update_repo
+        except typer.Exit:
+            raise
+        except Exception:  # noqa: BLE001 - a broken config is not a reason to refuse
+            typer.echo(f"(config unreadable; asking {repo})")
+
+    try:
+        release = selfupdate.latest_release(repo=repo)
+    except selfupdate.SelfUpdateError as exc:
+        _fail(exc)
+    if release is None:
+        typer.echo(f"{repo} has published no release with a {selfupdate.ASSET_NAME}.")
+        return
+
+    if not selfupdate.is_newer(release.tag, __version__):
+        typer.secho(
+            f"dzsm {__version__} is current ({release.tag} is the newest published).",
+            fg=typer.colors.GREEN,
+        )
+        return
+
+    typer.secho(f"dzsm {release.tag} is available (running {__version__}).", fg=typer.colors.YELLOW)
+    typer.echo(f"  {release.notes_url}")
+    if check:
+        typer.echo("Run `dzsm update` to fetch it.")
+        return
+
+    binary = selfupdate.running_binary()
+    if binary is None:
+        _fail(
+            selfupdate.SelfUpdateError(
+                "running from source, so there is nothing to replace. Pull the repo "
+                "instead, or build with `pyinstaller dzsm.spec`."
+            )
+        )
+
+    typer.echo(f"Downloading {release.size / 1_048_576:.1f} MiB...")
+    try:
+        fetched = selfupdate.download(release, selfupdate.staging_dir())
+        retired = selfupdate.apply(fetched)
+    except selfupdate.SelfUpdateError as exc:
+        _fail(exc)
+
+    typer.secho(f"Installed {release.tag} as {binary}.", fg=typer.colors.GREEN)
+    typer.echo(f"The previous build is {retired}.")
+    typer.echo("Restart dzsm for it to take effect - this process keeps the old one.")
 
 
 DeployDir = Annotated[

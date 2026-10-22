@@ -671,6 +671,18 @@ function serverCountdowns() {
        + '|' + ago(s.checked_at);
 }
 
+function dzsmUpdateBanner() {
+  const d = last.updates && last.updates.dzsm;
+  if (!d || !d.update_available) return '';
+  // Told, not offered: there is no button, because fetching a new binary is a decision
+  // taken at a terminal by someone who knows what the servers are doing.
+  return '<p><span class="warn">dzsm ' + esc(d.latest) + ' is available</span> '
+    + '<span class="note">&mdash; running ' + esc(d.running) + '. Run '
+    + '<code>dzsm update</code> on the server; it takes effect at the next start. '
+    + '</span><a' + attr('href', d.notes_url)
+    + ' target="_blank" rel="noopener noreferrer">release notes</a></p>';
+}
+
 function gameUpdateBanner() {
   const s = last.updates && last.updates.server;
   if (!s) return '';
@@ -802,6 +814,7 @@ function renderOverview() {
 
   h += addServerPanel() + steamPanel() + managerPanel();
 
+  h += dzsmUpdateBanner();
   h += '<h2>Server app</h2>' + gameUpdateBanner() + '<table><tr><th>Build<th></tr>';
   h += last.server.builds.map(b =>
     '<tr><td><code>' + esc(b) + '</code><td>' + (b === last.server.active ? 'newest' : '') + '</tr>'

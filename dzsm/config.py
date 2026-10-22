@@ -23,6 +23,8 @@ from pydantic import (
     model_validator,
 )
 
+from dzsm.selfupdate import DEFAULT_REPO
+
 # Steam application ids. The server app and the workshop content live under different
 # ids — workshop mods are published against the *client* app.
 SERVER_APPID = 223350
@@ -464,6 +466,16 @@ class Config(BaseModel):
     # update themselves and a server left on the old build stops accepting them entirely.
     # Costs one steamcmd `app_info_print` per check, which downloads nothing.
     check_server_build: bool = True
+
+    # Whether to ask GitHub, on the same housekeeping tick, if a newer dzsm has been
+    # published. Checking only: one HTTP request, and nothing is ever downloaded or
+    # replaced without someone running `dzsm update`. The binary supervising a server
+    # does not replace itself because a clock ticked.
+    check_for_updates: bool = True
+
+    # Where releases are looked for. Here rather than hardcoded so a fork updates from
+    # its own releases instead of silently pointing at somebody else's binary.
+    update_repo: str = DEFAULT_REPO
     # Download a new server build automatically. Off by default: several GB, unlike a
     # mod check. Nothing activates it until an instance restarts either way.
     server_update_auto_download: bool = False

@@ -77,6 +77,12 @@ class State(BaseModel):
     # The build id Steam publishes for the configured branch, from the last check. The
     # server-app counterpart of last_seen_remote.
     latest_remote_server_build: str | None = None
+
+    # The newest dzsm release seen on GitHub, and when it was looked for. Stored so the
+    # dashboard can say so without a request per page load, and so the answer survives a
+    # restart of the daemon.
+    latest_release_tag: str | None = None
+    release_checked_at: datetime | None = None
     server_build_checked_at: datetime | None = None
     # When Steam was last asked what changed. Separate from last_seen_remote, which only
     # records the answer: without this there is no way to tell "nothing has changed" from
