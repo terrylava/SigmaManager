@@ -2,9 +2,15 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "dzsm/__init__.py"
+
 [project]
 name = "dzsm"
-version = "0.1.0"
+# Read from dzsm/__init__.py so there is one place to change it. A test checks the two
+# cannot drift: this said 0.1.0 while the newest tag was v0.1.1, and an updater that
+# compares its own version against a release would have believed it.
+dynamic = ["version"]
 description = "DayZ server manager: versioned mod cache, steamcmd integration, instance supervision"
 readme = "README.md"
 # 3.11+ so tomllib is stdlib (config is TOML) and st_reparse_tag is available.

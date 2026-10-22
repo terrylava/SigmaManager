@@ -27,7 +27,16 @@ analysis = Analysis(
     binaries=[],
     # The dashboard is read from disk at request time; api._dashboard_path knows to look
     # under sys._MEIPASS when frozen.
-    datas=[("dzsm/dashboard.html", "dzsm")],
+    datas=[
+        ("dzsm/dashboard.html", "dzsm"),
+        # Carried so a bare exe on a fresh server can write out everything needed to
+        # run unattended. Without these, the binary distribution dead-ends the same
+        # way it used to with config.example.toml.
+        ("deploy/dzsm-daemon.cmd", "deploy"),
+        ("deploy/install-task.ps1", "deploy"),
+        ("deploy/README.md", "deploy"),
+        ("config.example.toml", "."),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],

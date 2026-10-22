@@ -15,8 +15,8 @@ from typing import Annotated, Any, NoReturn, Optional
 
 import typer
 
+from dzsm import __version__, deployment, mods, players, runner
 from dzsm import instance as dzsm_instance
-from dzsm import mods, players, runner
 from dzsm.config import Config, ConfigError, WorkshopMod, load_config
 from dzsm.instance import InstanceError
 from dzsm.mods import (
@@ -52,6 +52,13 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+
+def _show_version(value: bool) -> None:
+    if value:
+        typer.echo(f"dzsm {__version__}")
+        raise typer.Exit
+
+
 mods_app = typer.Typer(
     name="mods",
     help="Mod cache: check, download, list, GC.",
@@ -81,9 +88,21 @@ ModFilter = Annotated[
 ]
 
 
+# Eager, so --version answers before anything else runs — including on a machine where
+# the config is broken, which is one of the times you most want to know what you have.
+VersionFlag = Annotated[
+    bool,
+    typer.Option(
+        "--version", "-V", help="Print the version and exit.",
+        callback=_show_version, is_eager=True,
+    ),
+]
+
+
 @app.callback()
 def main(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Debug logging.")] = False,
+    version: VersionFlag = False,
 ) -> None:
     """Configure logging before any command runs (Rule 3: failures are never silent)."""
     logging.basicConfig(
@@ -1021,6 +1040,43 @@ def instance_status(config_path: ConfigPath = Path("config.toml")) -> None:
         typer.echo(f"{name:<16} {marker:<18} port {instance.port}  {rcon}  next {when}")
         typer.echo(f"{'':<16} server {build}")
         typer.echo(f"{'':<16} {versions}")
+
+
+DeployDir = Annotated[
+    Path, typer.Argument(help="Where to write them. Defaults to the current directory.")
+]
+
+
+@app.command()
+def deploy(
+    directory: DeployDir = Path(),
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite files that exist.")
+    ] = False,
+) -> None:
+    """Write out the files needed to run dzsm unattended.
+
+    The scheduled-task launcher, its installer, the deployment notes, and a commented
+    example config. They are carried inside the binary because a bare exe on a fresh
+    server otherwise dead-ends: the scripts live in the source tree, which is exactly
+    what someone deploying a single file does not have.
+
+    Never overwrites. The launcher is where the Steam key and API token are written by
+    hand, and clobbering it on an upgrade would wipe them.
+    """
+    try:
+        written, skipped = deployment.write_files(directory, force=force)
+    except deployment.DeploymentError as exc:
+        _fail(exc)
+
+    for path in written:
+        typer.secho(f"wrote {path}", fg=typer.colors.GREEN)
+    for path in skipped:
+        typer.echo(f"kept {path} (already there; --force to replace)")
+    if written:
+        typer.echo("")
+        typer.echo("Next: edit dzsm-daemon.cmd for your paths and keys, then")
+        typer.echo("  powershell -ExecutionPolicy Bypass -File install-task.ps1")
 
 
 @instance_app.command("args")
