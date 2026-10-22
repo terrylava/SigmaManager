@@ -53,6 +53,57 @@ def safe_rmtree(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def free_space(path: Path) -> int:
+    """Bytes free on the volume holding `path`, or 0 when it cannot be determined.
+
+    0 rather than raising: a guard that cannot read the disk must not be the thing that
+    stops a download, and `require_space` treats 0 as "unknown, allow it" for the same
+    reason.
+    """
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        return shutil.disk_usage(probe).free
+    except OSError as exc:
+        _log.debug("could not read free space for %s: %s", path, exc)
+        return 0
+
+
+def require_space(config: Config, needed: int, *, what: str) -> None:
+    """Refuse an operation that would leave the disk too empty to run on.
+
+    Everything big here lands under `root`: the mod cache, server builds of several GB,
+    a 3.9 GB isolated copy per instance, and the backups. Filling that volume does not
+    fail one download — it takes down every server on the box at once, and a DayZ
+    server that cannot write its persistence loses the world it was holding.
+
+    `needed` is what the operation is about to write, 0 when that is not known. The
+    floor underneath it is `min_free_gb`, which is what keeps a running server able to
+    write after the operation finishes.
+
+    Raises ModCacheError, which every caller here already handles.
+    """
+    floor = int(config.min_free_gb * 1024 * 1024 * 1024)
+    if floor <= 0 and needed <= 0:
+        return
+    free = free_space(config.root)
+    if free == 0:
+        return
+    if free >= needed + floor:
+        return
+    where = config.root.anchor or config.root
+    raise ModCacheError(
+        f"not enough disk space for {what}: {_gib(free)} free on {where}, and this "
+        f"needs {_gib(needed)} plus the {_gib(floor)} floor (min_free_gb). "
+        f"Free some space, or lower min_free_gb."
+    )
+
+
+def _gib(value: int) -> str:
+    return f"{value / (1024 * 1024 * 1024):.1f} GiB"
+
+
 def promote_tree(
     source: Path,
     destination: Path,

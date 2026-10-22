@@ -23,14 +23,13 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from dzsm.config import Config
 from dzsm.instance import InstanceError, effective_server_dir, read_template
-from dzsm.mods import promote_tree, safe_rmtree
+from dzsm.mods import ModCacheError, promote_tree, require_space, safe_rmtree
 from dzsm.state import State
 
 _log = logging.getLogger(__name__)
@@ -146,6 +145,11 @@ def take(
 
     stamp = _free_stamp(backups_dir(config, instance_name))
     target = backups_dir(config, instance_name) / stamp
+
+    try:
+        require_space(config, _tree_size(mission), what=f"a backup of {instance_name!r}")
+    except ModCacheError as exc:
+        raise BackupError(str(exc)) from exc
 
     _log.info("instance %s: backing up %s to %s", instance_name, mission.name, target)
     try:
@@ -289,10 +293,3 @@ def _tree_size(path: Path) -> int:
             continue
     return total
 
-
-def free_bytes(path: Path) -> int:
-    """Free space on the volume holding `path`, 0 when it cannot be determined."""
-    try:
-        return shutil.disk_usage(path).free
-    except OSError:
-        return 0

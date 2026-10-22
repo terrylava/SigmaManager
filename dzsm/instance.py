@@ -14,10 +14,11 @@ import secrets
 import shutil
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 from dzsm.config import Config, InstanceConfig
-from dzsm.mods import promote_tree, safe_rmtree
+from dzsm.mods import promote_tree, require_space, safe_rmtree
 from dzsm.state import State
 
 _log = logging.getLogger(__name__)
@@ -198,6 +199,9 @@ def prepare_server_directory(
 
     if target.is_dir() and current == build and not refresh:
         return target, build
+
+    # A full copy of the build, measured rather than guessed: 3.9 GB for 1.30.
+    require_space(config, _tree_size(source), what=f"an isolated copy for {instance_name!r}")
 
     stash: Path | None = None
     if target.exists():
@@ -570,6 +574,81 @@ def prepare_mission(config: Config, server_dir: Path, instance_name: str) -> str
 
     write_template(config.instance_dir(instance_name) / instance.config_file, mission)
     return mission
+
+
+# What the engine writes into an instance's profile directory. Everything else there
+# is a directory or something a mod put there, and is left alone.
+LOG_SUFFIXES = frozenset({".rpt", ".adm", ".log", ".mdmp"})
+
+# Kept per suffix regardless of age, so there is always recent context to read after
+# something goes wrong — including on an instance that has been down for months.
+KEEP_NEWEST_LOGS = 2
+
+
+def _tree_size(path: Path) -> int:
+    """Bytes a directory holds, skipping anything that cannot be read."""
+    total = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def prune_logs(
+    config: Config, instance_name: str, *, older_than_days: int, keep_newest: int = KEEP_NEWEST_LOGS
+) -> list[Path]:
+    """Delete old engine logs for one instance. Returns what was removed.
+
+    These accumulate forever: .RPT, .ADM, script and error logs, and crash dumps, one
+    set per start. A live instance had 47 of them after a few days.
+
+    Two things this must not do. It must not delete a file the running server has open
+    — Windows refuses, which is handled, but the newest of each kind is skipped anyway
+    so the current run is never a candidate. And it must not run before the .ADM ingest
+    that feeds the player ledger, or the session history loses whatever it deletes; the
+    caller on the housekeeping tick is ordered for that.
+
+    Returns a list, empty when there is nothing old enough — never None (Rule 1).
+    """
+    if older_than_days <= 0:
+        return []
+    profiles = config.instance_dir(instance_name) / "profiles"
+    if not profiles.is_dir():
+        return []
+
+    cutoff = datetime.now().timestamp() - older_than_days * 86400
+    by_suffix: dict[str, list[Path]] = {}
+    for entry in profiles.iterdir():
+        if entry.is_file() and entry.suffix.lower() in LOG_SUFFIXES:
+            by_suffix.setdefault(entry.suffix.lower(), []).append(entry)
+
+    removed: list[Path] = []
+    for suffix, files in by_suffix.items():
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for entry in files[keep_newest:]:
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                entry.unlink()
+            except OSError as exc:
+                # Open by the running server, most likely. Not an error worth raising:
+                # it will be a candidate again next time, by which point it is closed.
+                _log.debug("instance %s: could not remove %s: %s", instance_name, entry, exc)
+                continue
+            removed.append(entry)
+        del suffix
+
+    if removed:
+        _log.info(
+            "instance %s: removed %d log file(s) older than %d days",
+            instance_name,
+            len(removed),
+            older_than_days,
+        )
+    return removed
 
 
 def battleye_config_path(config: Config, instance_name: str) -> Path:

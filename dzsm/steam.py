@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 
 from dzsm.config import WORKSHOP_APPID, Config, SteamConfig
-from dzsm.mods import promote_snapshot
+from dzsm.mods import promote_snapshot, require_space
 from dzsm.state import State
 
 _log = logging.getLogger(__name__)
@@ -554,6 +554,10 @@ def download_mod(config: Config, workshop_id: int) -> DownloadResult:
     steam = config.steam
     acf_before = _mtime(config.workshop_acf)
 
+    # Before steamcmd writes anything. A download that fills the volume does not fail
+    # alone: every instance under this root loses the ability to write its persistence.
+    require_space(config, 0, what=f"mod {workshop_id}")
+
     _log.info("steam: downloading mod %s", workshop_id)
     run = _run_steamcmd(
         steam,
@@ -630,6 +634,12 @@ def verify_download(config: Config, result: DownloadResult) -> None:
     _log.info("steam: mod %s download verified at %s", workshop_id, result.path)
 
 
+# What a DayZ server build costs, near enough to refuse an update that obviously will
+# not fit. Measured at 3.9 GB for the 1.30 build; doubled because the download directory
+# and the promoted version directory both exist while the copy is in progress.
+SERVER_APP_ESTIMATE_BYTES = 8 * 1024 * 1024 * 1024
+
+
 def update_server_app(config: Config, *, validate: bool = False) -> str:
     """Download/update the DayZ server app (223350) into a version directory.
 
@@ -648,6 +658,9 @@ def update_server_app(config: Config, *, validate: bool = False) -> str:
     was not actually installed (Rule 1).
     """
     appid = config.server_appid
+    # The server app is several GB and then gets promoted into a version directory,
+    # so the peak is roughly twice that before the download directory is reused.
+    require_space(config, SERVER_APP_ESTIMATE_BYTES, what="the server app")
     download_dir = config.serverapp_download_dir
     download_dir.mkdir(parents=True, exist_ok=True)
     manifest = download_dir / "steamapps" / f"appmanifest_{appid}.acf"

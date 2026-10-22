@@ -51,7 +51,7 @@ from pydantic import BaseModel
 from dzsm import __version__, players, runner, settings
 from dzsm import instance as instance_mod
 from dzsm.config import Config, WorkshopMod, load_config
-from dzsm.instance import DEFAULT_TERRAIN, InstanceError
+from dzsm.instance import DEFAULT_TERRAIN, InstanceError, prune_logs
 from dzsm.mods import (
     ModCacheError,
     delete_version,
@@ -307,6 +307,30 @@ def _auto_check(
         # open admin log grows continuously while anyone is connected, and re-parsing it
         # every 15s to learn nothing would be pure waste.
         _ingest_sessions(config)
+
+        # Strictly after the ingest above, never before: the .ADM files are what the
+        # player ledger is built from, so pruning them first would delete sessions that
+        # had never been read.
+        _prune_logs(config)
+
+
+def _prune_logs(config: Config) -> int:
+    """Delete engine logs past their retention, across every instance.
+
+    Never raises: tidying up is not a reason for the housekeeping tick to stop doing the
+    things people depend on (Rule 3).
+    """
+    if config.log_retention_days <= 0:
+        return 0
+    removed = 0
+    for name in config.instances:
+        try:
+            removed += len(
+                prune_logs(config, name, older_than_days=config.log_retention_days)
+            )
+        except OSError as exc:
+            _log.error("instance %s: could not prune logs: %s", name, exc)
+    return removed
 
 
 def _check_for_release(config: Config) -> str | None:

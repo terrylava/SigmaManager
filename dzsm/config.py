@@ -482,6 +482,17 @@ class Config(BaseModel):
     # How many consecutive failed starts before the supervisor stops trying. The
     # instance is left in a failed state the dashboard shows, with the reason, instead
     # of being restarted every poll interval forever. 0 never gives up.
+    # Refuse a download, a server copy or a backup that would leave less than this
+    # free. Everything big lands under `root`, and filling that volume does not fail one
+    # download -- it takes down every server on the box, and a DayZ server that cannot
+    # write its persistence loses the world it was holding. 0 turns the guard off.
+    min_free_gb: float = 10.0
+
+    # Delete logs in instances/<name>/profiles/ older than this. The .ADM files feed the
+    # player ledger, so pruning runs after the ingest that reads them, never before.
+    # 0 keeps everything.
+    log_retention_days: int = 30
+
     crash_restart_limit: int = 5
 
     # After a second consecutive failure, go back to the mod versions the instance last
