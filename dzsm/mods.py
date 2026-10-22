@@ -846,8 +846,10 @@ def mod_paths(config: Config, instance_name: str, versions: dict[str, int]) -> l
     semicolon order in -mod=, and framework mods have to precede their dependents
     (spec §4).
 
-    Raises ModCacheError if any path is missing, rather than quietly starting a server
-    with a mod absent.
+    Raises ModCacheError if a *workshop* mod's version directory is missing: that is a
+    cache that should have been there, and it can be fetched. A local mod whose folder
+    has gone is skipped instead, with an error logged — nothing can be downloaded to
+    replace it, so refusing to start only turns a missing mod into a missing server.
     """
     return _paths_for(config, instance_name, config.instances[instance_name].mods, versions)
 
@@ -886,6 +888,20 @@ def _paths_for(
             path = mod.path
 
         if not path.is_dir():
+            if isinstance(mod, LocalMod):
+                # A local mod is a folder someone put there by hand, and it can be moved,
+                # renamed or deleted without dzsm hearing about it. There is nothing to
+                # download and nothing to fall back to, so the choice is between a server
+                # that is up without it and a server that is down — and a server that is
+                # down helps nobody. Loudly, with the path, because the next question is
+                # always "where did it go".
+                _log.error(
+                    "instance %s: local mod %r is not at %s — starting without it",
+                    instance_name,
+                    mod_name,
+                    path,
+                )
+                continue
             raise ModCacheError(
                 f"instance {instance_name!r}: mod {mod_name!r} path does not exist: {path}"
             )
