@@ -9,4 +9,4 @@ Design spec: ../dayz-server-manager-spec.md
 #
 # Three parts, always. is_newer compares tuples of numbers, so a later "0.1.2" would
 # read as OLDER than a bare "0.2": on an equal prefix the shorter tuple wins.
-__version__ = "0.1.2"
+__version__ = "0.1.3"
