@@ -479,6 +479,16 @@ class Config(BaseModel):
     # Copy an instance's world during the restart window dzsm already owns. That is the
     # one moment it is certainly consistent: DayZ writes persistence continuously, so a
     # copy taken from a running server can catch a record mid-write.
+    # How many consecutive failed starts before the supervisor stops trying. The
+    # instance is left in a failed state the dashboard shows, with the reason, instead
+    # of being restarted every poll interval forever. 0 never gives up.
+    crash_restart_limit: int = 5
+
+    # After a second consecutive failure, go back to the mod versions the instance last
+    # stayed up on. The immutable version cache means the old copy is still there by
+    # construction, so this costs nothing but the attempt.
+    rollback_on_failed_start: bool = True
+
     backup_on_restart: bool = True
 
     # How many copies to keep per instance. 0 keeps every one: a retention number nobody

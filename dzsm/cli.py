@@ -968,6 +968,7 @@ def instance_start(
     cfg = _load_config(config_path)
     state = _load_state(cfg)
     try:
+        runner.clear_failures(state, name)
         pid = runner.start(cfg, state, name, refresh_server=refresh_server)
     except (RunnerError, InstanceError, ModCacheError) as exc:
         _fail(exc)

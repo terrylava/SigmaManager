@@ -45,6 +45,19 @@ class ProcessInfo(BaseModel):
     create_time: float | None = None
 
 
+class FailureInfo(BaseModel):
+    """Consecutive failed starts for one instance.
+
+    Cleared once an instance has been up long enough to call it working, so "count" is
+    always the current run of failures rather than a lifetime tally.
+    """
+
+    count: int = 0
+    first_at: datetime
+    last_at: datetime
+    last_error: str | None = None
+
+
 class State(BaseModel):
     """Everything dzsm knows that isn't in config."""
 
@@ -63,6 +76,19 @@ class State(BaseModel):
     # supervisor that immediately undoes an explicit stop is worse than no supervisor.
     # Starting it clears the hold.
     held: dict[str, datetime] = Field(default_factory=dict)
+    # instance name -> its current run of failed starts. Distinct from `held`, which
+    # means someone chose to stop it: this one means it will not stay up. The supervisor
+    # backs off between attempts and stops entirely past a limit, because restarting a
+    # server that cannot start, every poll, forever, tells nobody anything.
+    failures: dict[str, FailureInfo] = Field(default_factory=dict)
+    # instance name -> the mod versions it last ran with and stayed up on. What a
+    # rollback goes back to. Separate from `pins`, which is what it tried most recently
+    # and may be exactly what is breaking it.
+    good_pins: dict[str, dict[str, int]] = Field(default_factory=dict)
+    # instance name -> versions to use at the next start instead of resolving the newest.
+    # Consumed by that start. This is how a rollback actually takes effect, since
+    # resolution otherwise always prefers the newest cached version.
+    forced_versions: dict[str, dict[str, int]] = Field(default_factory=dict)
     # instance name -> the server build it activated at its last start. Separate from
     # `pins` because a build id is a string and a mod version is an int, and conflating
     # them would make both harder to reason about.

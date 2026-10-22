@@ -1269,6 +1269,7 @@ def create_app(config_path: Path) -> FastAPI:
         state = current_state()
         _known_instance(config, name)
         try:
+            runner.clear_failures(state, name)
             pid = runner.start(config, state, name)
         except (runner.RunnerError, InstanceError, ModCacheError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1296,6 +1297,7 @@ def create_app(config_path: Path) -> FastAPI:
         try:
             # hold=False: a restart is not a request for the instance to stay down.
             runner.stop(config, state, name, hold=False)
+            runner.clear_failures(state, name)
             pid = runner.start(config, state, name)
         except (runner.RunnerError, InstanceError, ModCacheError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

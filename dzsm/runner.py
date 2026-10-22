@@ -27,6 +27,7 @@ from dzsm import backup
 from dzsm.config import Config, ConfigError, InstanceConfig, WorkshopMod, load_config
 from dzsm.instance import (
     COMMAND_LINE_LIMIT,
+    InstanceError,
     battleye_config_path,
     build_launch_args,
     carry_keys_forward,
@@ -49,7 +50,7 @@ from dzsm.mods import (
     uncached_mods,
 )
 from dzsm.rcon import RconClient, RconError
-from dzsm.state import ProcessInfo, State, StateError, load_state, save_state
+from dzsm.state import FailureInfo, ProcessInfo, State, StateError, load_state, save_state
 from dzsm.steam import SteamError, fetch_mod
 
 _log = logging.getLogger(__name__)
@@ -459,13 +460,23 @@ def supervise(
                         update=updating,
                     )
 
-                if not is_running(config, state, name):
-                    # Crash restart. Activation runs again here, so a mod that finished
-                    # downloading since the last start is picked up now.
-                    _log.warning("instance %s: process gone, restarting", name)
-                    _start_and_save(config, state, name, reason="crash restart")
-                    warned.pop(name, None)
-                    due[name] = _due_at(config, state, name)
+                if is_running(config, state, name):
+                    # Up, and up long enough to call it working: this run of failures is
+                    # over, and these are the versions to go back to if a later one
+                    # breaks it.
+                    _note_healthy(config, state, name)
+                    continue
+
+                if not _may_restart(config, state, name, now):
+                    continue
+
+                # Crash restart. Activation runs again here, so a mod that finished
+                # downloading since the last start is picked up now.
+                _log.warning("instance %s: process gone, restarting", name)
+                _note_failure(config, state, name, "process gone")
+                _start_and_save(config, state, name, reason="crash restart")
+                warned.pop(name, None)
+                due[name] = _due_at(config, state, name)
     except KeyboardInterrupt:
         _log.info("supervision interrupted; leaving instances running")
     else:
@@ -558,6 +569,16 @@ def versions_to_activate(config: Config, state: State, instance_name: str) -> di
     A server up with slightly stale mods beats a server that is down, so a resolution
     failure never propagates — it degrades to whatever the instance last ran.
     """
+    forced = state.forced_versions.pop(instance_name, None)
+    if forced:
+        # A rollback. Consumed here so exactly one attempt is made on the old versions:
+        # if that works the instance earns them back as good_pins, and if it does not,
+        # nothing is quietly pinned forever.
+        _log.warning(
+            "instance %s: starting on rolled-back versions %s", instance_name, forced
+        )
+        return dict(forced)
+
     try:
         return resolve_mod_versions(config, state, instance_name)
     except ModCacheError as exc:
@@ -914,11 +935,170 @@ def _live_process(config: Config, state: State, instance_name: str) -> psutil.Pr
     return process
 
 
+# How long to wait before trying a failed instance again, by how many times it has
+# failed in a row. An instance that dies on startup used to be restarted every poll
+# interval forever, writing one line each time and telling nobody — indistinguishable
+# from a healthy server in everything but the log.
+BACKOFF_SECONDS = (15, 60, 300, 900)
+
+# How long an instance has to stay up before the run of failures is considered over.
+# Shorter than the time DayZ takes to load a heavily modded mission, on purpose: this is
+# about the process surviving, not the server being ready.
+HEALTHY_AFTER_SECONDS = 120
+
+# Which consecutive failure triggers a rollback. The first can be anything — a port
+# still held, a slow disk, a Steam hiccup. By the second, if the versions changed since
+# the instance last stayed up, the new ones are the suspect.
+ROLLBACK_AFTER_FAILURES = 2
+
+
+def clear_failures(state: State, instance_name: str) -> bool:
+    """Forget an instance's run of failed starts. True if there was one.
+
+    Called when a *person* asks for a start, so a limit reached hours ago does not stand
+    in the way of someone who has just fixed the problem; the count earns itself back if
+    they have not.
+
+    Deliberately not inside start(). The supervisor restarts through that same function,
+    so clearing there wiped the counter the backoff reads — and the backoff did nothing
+    at all. Found by watching it: 36 restarts in 75 seconds.
+    """
+    if state.failures.pop(instance_name, None) is None:
+        return False
+    _log.info("instance %s: previous failures cleared by an explicit start", instance_name)
+    return True
+
+
+def _may_restart(config: Config, state: State, instance_name: str, now: datetime) -> bool:
+    """Whether to attempt a start, given how the last few went.
+
+    False for two different reasons, and they are logged differently: still inside the
+    backoff window (quiet, it will be tried again), or past the limit (said once, and
+    the instance is left alone until someone starts it).
+    """
+    failure = state.failures.get(instance_name)
+    if failure is None:
+        return True
+
+    limit = config.crash_restart_limit
+    if limit and failure.count >= limit:
+        if failure.count == limit:
+            # Once, not every pass. Bumping the count past the limit is what makes this
+            # the last line written about it.
+            _log.error(
+                "instance %s: failed to stay up %d times in a row, last error: %s. "
+                "Not trying again — `dzsm instance start %s` when it is fixed.",
+                instance_name,
+                failure.count,
+                failure.last_error or "unknown",
+                instance_name,
+            )
+            failure.count += 1
+            _save(config, state)
+        return False
+
+    wait = BACKOFF_SECONDS[min(failure.count - 1, len(BACKOFF_SECONDS) - 1)]
+    ready_at = failure.last_at + timedelta(seconds=wait)
+    if now < ready_at:
+        _log.debug(
+            "instance %s: waiting %.0fs before the next attempt",
+            instance_name,
+            (ready_at - now).total_seconds(),
+        )
+        return False
+    return True
+
+
+def _note_failure(config: Config, state: State, instance_name: str, error: str) -> None:
+    """Record that an instance would not stay up, and roll back if that is new."""
+    now = datetime.now()
+    failure = state.failures.get(instance_name)
+    if failure is None:
+        state.failures[instance_name] = FailureInfo(
+            count=1, first_at=now, last_at=now, last_error=error
+        )
+    else:
+        failure.count += 1
+        failure.last_at = now
+        failure.last_error = error
+
+    if state.failures[instance_name].count == ROLLBACK_AFTER_FAILURES:
+        _roll_back(config, state, instance_name)
+
+
+def _roll_back(config: Config, state: State, instance_name: str) -> None:
+    """Go back to the mod versions this instance last stayed up on.
+
+    The whole point of an immutable version cache: the copy that worked is still on disk
+    by construction, so going back costs nothing but the attempt. Nothing is deleted and
+    nothing in config changes — the forced versions are consumed by the next start, so
+    one attempt is made on the old ones and the situation stays visible.
+    """
+    if not config.rollback_on_failed_start:
+        return
+    good = state.good_pins.get(instance_name)
+    if not good:
+        return
+    current = state.pins.get(instance_name, {})
+    if good == current:
+        # Nothing changed since it last worked, so the mods are not the suspect.
+        return
+
+    changed = {
+        name: (current.get(name), version)
+        for name, version in good.items()
+        if current.get(name) != version
+    }
+    _log.error(
+        "instance %s: failed twice since its mod versions changed; going back to the "
+        "versions it last stayed up on (%s)",
+        instance_name,
+        ", ".join(f"{n}: {was} -> {to}" for n, (was, to) in changed.items()),
+    )
+    state.forced_versions[instance_name] = dict(good)
+
+
+def _note_healthy(config: Config, state: State, instance_name: str) -> None:
+    """Clear the run of failures once an instance has been up long enough to count.
+
+    Also records what it is running as the versions to go back to. This is the only
+    place good_pins is written: a set of versions earns that name by surviving, not by
+    being started.
+    """
+    process = state.processes.get(instance_name)
+    if process is None:
+        return
+    started = process.started_at
+    if started.tzinfo is not None:
+        started = started.astimezone().replace(tzinfo=None)
+    if (datetime.now() - started).total_seconds() < HEALTHY_AFTER_SECONDS:
+        return
+
+    pins = dict(state.pins.get(instance_name, {}))
+    dirty = False
+    if instance_name in state.failures:
+        _log.info("instance %s: up and stable again", instance_name)
+        del state.failures[instance_name]
+        dirty = True
+    if state.good_pins.get(instance_name) != pins:
+        state.good_pins[instance_name] = pins
+        dirty = True
+    if dirty:
+        _save(config, state)
+
+
 def _start_and_save(config: Config, state: State, instance_name: str, *, reason: str) -> None:
     try:
         start(config, state, instance_name)
-    except (RunnerError, ModCacheError) as exc:
+    except (RunnerError, ModCacheError, InstanceError) as exc:
+        # InstanceError belongs here too, and did not used to: "no server app available"
+        # or a mission_source that does not exist came out of start() uncaught, through
+        # the supervise loop, and ended supervision for *every* instance. One server
+        # that cannot start must never take the others' crash restarts with it.
         _log.error("instance %s: %s failed: %s", instance_name, reason, exc)
+        # A start that refuses outright counts the same as one that dies seconds later:
+        # either way the instance is not up, and trying again immediately will not help.
+        _note_failure(config, state, instance_name, str(exc))
     finally:
         _save(config, state)
 
