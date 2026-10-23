@@ -30,6 +30,9 @@ dependencies = [
 web = [
     "fastapi>=0.111",
     "uvicorn>=0.30",
+    # Mints the self-signed certificate for api.tls. Windows ships no OpenSSL, and
+    # without TLS the API token crosses the LAN in clear text on every request.
+    "cryptography>=42",
 ]
 dev = [
     "mypy>=1.10",

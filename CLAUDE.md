@@ -468,15 +468,39 @@ same functions the CLI does, so the two can never disagree about what "running" 
 
 Access model, which is the part to not weaken:
 
-- Reads are open; they disclose nothing secret.
+- Most reads are open; they disclose nothing secret. The exceptions are gated like
+  writes: anything showing passwords (serverDZ.cfg, config), personal data about players
+  (players, feed, bans), the filesystem (localmods), or spending the Steam Web API key
+  (workshop search — reachable from a LAN, anyone on it could burn the key's rate limit).
 - Writes require the token from `api.token_env` when one is set, compared with
   `secrets.compare_digest`.
 - With no token, writes are still allowed — because `serve` **refuses to bind a
   non-loopback address without one**. That guard is what makes the whole model hold; if
   you ever make writes open on a bound interface, the refusal must go with it.
-- `tests/test_api.py::test_every_write_route_requires_the_token` lists every write route
-  explicitly. A new one added without the dependency fails that test rather than shipping
-  unauthenticated. Add to the list when you add a route.
+- **Off-loopback also requires TLS** (`api.tls = true`), unless `allow_plain_http` is set
+  on purpose. Over plain HTTP the token crosses the network in clear text on every
+  request, which makes the token rule nearly worthless the moment it leaves the
+  machine. Both conditions live in one function, `cli._check_bind`, used by `serve` and
+  `daemon` alike — the token check was written out twice before, and two copies of a
+  security rule drift.
+- `tests/test_api.py::WRITE_ROUTES` lists every write route, and
+  `test_the_list_above_covers_every_write_route` compares it with what the app actually
+  serves. That second test is what makes the first one mean anything: the list used to
+  be checked only against itself, had drifted to 12 of 27 routes, and stayed green when
+  three new ones went in. Add to the list when you add a route; the test tells you if
+  you forget.
+
+**The certificate is self-signed and must not churn** (`dzsm/tls.py`). It is made under
+`root/tls/` on first start and *reused* until it is missing, within 30 days of expiry, or
+no longer names the bind address. Every new one is a new fingerprint and a new browser
+warning on every PC that has connected before, and warnings seen often get clicked
+through — which is the one habit a self-signed certificate depends on people not having.
+The SHA-256 fingerprint is printed at startup, returned by `/api/health` and shown in the
+dashboard, so a first connection is a comparison rather than a leap of faith; that
+comparison is what defeats something answering in the server's place. `cert_file` /
+`key_file` bring-your-own are used exactly as given, never rewritten. `cryptography` is
+imported lazily, only when TLS is on: it belongs to the `web` extra, and the rest of the
+CLI must work without it.
 
 Downloads return 202 with a job id; jobs are in-memory and deliberately not persisted, as
 a "running" job restored from disk after a restart would be a lie.

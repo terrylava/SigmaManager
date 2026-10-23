@@ -171,6 +171,21 @@ class ApiConfig(BaseModel):
     # itself is never in config.
     token_env: str = "DZSM_API_TOKEN"  # noqa: S105 — a var name, not a secret
 
+    # Serve over HTTPS with a certificate dzsm makes for itself (or the one below).
+    # Off by default so the loopback setup is unchanged; required to bind anywhere
+    # else, because over plain HTTP the token crosses the network in clear text on
+    # every request, and whoever reads it has full control.
+    tls: bool = False
+
+    # Bring your own certificate instead — one from a home CA removes the browser
+    # warning entirely. Both or neither; used exactly as given, never rewritten.
+    cert_file: Path | None = None
+    key_file: Path | None = None
+
+    # Bind off-loopback without TLS anyway. For a network nobody else can see into,
+    # chosen on purpose; the default must not be the one that leaks the credential.
+    allow_plain_http: bool = False
+
     def token(self) -> str | None:
         """The configured token, or None when unset."""
         return os.environ.get(self.token_env) or None

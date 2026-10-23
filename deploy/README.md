@@ -77,3 +77,59 @@ Instances are deliberately **left running** when the daemon exits — dzsm going
 not take the game servers with it. It adopts them again from `state.json` when it comes
 back. To bring a server down, stop the instance (which records a hold so the supervisor
 does not restart it), not the daemon.
+
+## Reaching the dashboard from another PC
+
+Off by default: the dashboard binds `127.0.0.1` and only this machine can reach it. Four
+steps to open it to the rest of your LAN, and dzsm refuses to start if you skip either
+of the first two.
+
+**1. A token.** Every write, and every read that shows passwords or player data, needs
+it. Generate a long random one and put it in `dzsm-daemon.cmd`:
+
+```bat
+set "DZSM_API_TOKEN=paste-a-long-random-string-here"
+```
+
+```powershell
+-join ((1..40) | ForEach-Object { [char](Get-Random -InputObject (48..57 + 65..90 + 97..122)) })
+```
+
+**2. HTTPS.** Without it, that token crosses the network in plain text on every request,
+and anyone who captures it has full control. In `config.toml`:
+
+```toml
+[api]
+host = "192.168.1.150"   # this machine's LAN address
+tls = true
+```
+
+dzsm makes its own certificate under `<root>\tls\` on first start and reuses it after.
+Prefer the specific LAN address over `0.0.0.0`, which also listens on VPN and virtual
+adapters.
+
+**3. The firewall,** scoped to your local subnet on Private networks only, so a router
+port-forward does not expose it:
+
+```powershell
+.\install-task.ps1 -OpenFirewall -Port 8080
+```
+
+**4. Check the fingerprint the first time — this is the step not to skip.** The browser
+will warn, because the certificate is self-signed. The daemon prints a line like:
+
+```
+certificate fingerprint (SHA-256): 3A:F1:...:9C
+```
+
+and the dashboard shows the same string at the bottom of every page. In the browser
+warning, open the certificate details and compare its SHA-256 fingerprint with that.
+**If they match, it is your server — accept it.** If they do not, something else on the
+network is answering in its place; do not type the token in.
+
+Each PC asks once. The certificate is kept for as long as it is valid and still names
+this machine's address, so you will only see the warning again if the server's IP
+changes or the certificate nears expiry (about two years).
+
+Prefer no warning at all? Issue a certificate from your own CA and point
+`cert_file`/`key_file` under `[api]` at it; dzsm uses those as given.

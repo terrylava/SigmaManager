@@ -533,6 +533,19 @@ class SessionRegistry:
 PERSISTED_EVENTS = frozenset({"chat", "connect", "disconnect", "kick"})
 
 
+def _served_fingerprint(config: Config) -> str | None:
+    """The fingerprint of the certificate being served, or None without TLS.
+
+    Read, never made: the CLI makes it before the server starts, and an API route that
+    could mint a new certificate would let a page load change what every PC trusts.
+    """
+    if not config.api.tls:
+        return None
+    from dzsm import tls
+
+    return tls.read_fingerprint(config.api.cert_file or tls.tls_dir(config) / tls.CERT_NAME)
+
+
 def _rcon_command(
     config: Config, sessions: SessionRegistry, name: str, command: str
 ) -> str:
@@ -788,10 +801,17 @@ def create_app(config_path: Path) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        """Liveness, plus the certificate fingerprint when serving over TLS.
+
+        The fingerprint is public by nature — it is in the certificate every client
+        receives — and it is what someone compares on their first connection from a new
+        PC, so it is shown here for the dashboard footer rather than only on the console.
+        """
         return {
             "ok": True,
             "root": str(config.root),
             "authenticated": config.api.token() is not None,
+            "tls_fingerprint": _served_fingerprint(config),
         }
 
     @app.get("/api/instances")
@@ -1528,7 +1548,7 @@ def create_app(config_path: Path) -> FastAPI:
 
     # --- workshop ------------------------------------------------------------
 
-    @app.get("/api/workshop/search")
+    @app.get("/api/workshop/search", dependencies=writes)
     def workshop_search(
         q: str = "",
         page: int = 1,

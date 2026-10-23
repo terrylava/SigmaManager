@@ -294,3 +294,14 @@ def test_loopback_addresses(host: str) -> None:
 def test_non_loopback_addresses(host: str) -> None:
     """0.0.0.0 is the dangerous one: it binds every interface."""
     assert _is_loopback(host) is False
+
+
+def test_workshop_search_needs_the_token(secured: TestClient) -> None:
+    """It spends the Steam Web API key. Harmless while only loopback could reach it;
+    reachable from the LAN, anyone on it could burn that key's rate limit. The keyless
+    lookup by id stays open."""
+    assert secured.get("/api/workshop/search?q=trader").status_code == 401
+
+
+def test_health_reports_no_fingerprint_without_tls(client: TestClient) -> None:
+    assert client.get("/api/health").json()["tls_fingerprint"] is None

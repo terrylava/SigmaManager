@@ -306,16 +306,9 @@ def serve(
     bind_host = host or cfg.api.host
     bind_port = port or cfg.api.port
 
-    if not _is_loopback(bind_host) and cfg.api.token() is None:
-        _fail(
-            ValueError(
-                f"refusing to bind {bind_host} without a token: this API can start, "
-                f"stop, and delete things, and anyone able to reach the port could do "
-                f"so. Set {cfg.api.token_env} in the environment, or bind 127.0.0.1."
-            )
-        )
-
+    _check_bind(cfg, bind_host)
     uvicorn, create_app = _web_dependencies(cfg)
+    tls = _tls_for(cfg, bind_host)
 
     if cfg.api.token() is None:
         typer.secho(
@@ -323,8 +316,14 @@ def serve(
             f"which is why this is bound to {bind_host}",
             fg=typer.colors.YELLOW,
         )
-    typer.echo(f"http://{bind_host}:{bind_port}")
-    uvicorn.run(create_app(config_path), host=bind_host, port=bind_port, log_level="info")
+    typer.echo(_url(bind_host, bind_port, tls))
+    uvicorn.run(
+        create_app(config_path),
+        host=bind_host,
+        port=bind_port,
+        log_level="info",
+        **_ssl_args(tls),
+    )
 
 
 @app.command()
@@ -394,15 +393,9 @@ def daemon(
     unknown = [name for name in names if name not in cfg.instances]
     if unknown:
         _fail(ValueError(f"unknown instance(s): {', '.join(unknown)}"))
-    if not _is_loopback(bind_host) and cfg.api.token() is None:
-        _fail(
-            ValueError(
-                f"refusing to bind {bind_host} without a token: this API can start, "
-                f"stop, and delete things. Set {cfg.api.token_env}, or bind 127.0.0.1."
-            )
-        )
-
+    _check_bind(cfg, bind_host)
     uvicorn, create_app = _web_dependencies(cfg)
+    tls = _tls_for(cfg, bind_host)
 
     stop = threading.Event()
     supervisor = threading.Thread(
@@ -415,13 +408,17 @@ def daemon(
     supervisor.start()
 
     typer.echo(f"supervising {', '.join(names)}")
-    url = f"http://{bind_host}:{bind_port}"
+    url = _url(bind_host, bind_port, tls)
     typer.echo(url)
     if open_browser:
         _open_when_listening(url)
     try:
         uvicorn.run(
-            create_app(config_path), host=bind_host, port=bind_port, log_level="info"
+            create_app(config_path),
+            host=bind_host,
+            port=bind_port,
+            log_level="info",
+            **_ssl_args(tls),
         )
     finally:
         stop.set()
@@ -464,6 +461,78 @@ def _web_dependencies(cfg: Config) -> tuple[Any, Any]:
             )
         )
     return uvicorn, create_app
+
+
+def _check_bind(cfg: Config, bind_host: str) -> None:
+    """Refuse to listen anywhere a stranger could reach without the protection for it.
+
+    Two conditions for leaving loopback, and the reasoning is the same for both: the
+    default must never be the setting that hands control to whoever is on the network.
+
+    - A token, because these routes start, stop and delete things.
+    - TLS, because over plain HTTP that token crosses the network in clear text on every
+      request. `allow_plain_http` is the deliberate way past it, for a network nobody
+      else can see into.
+
+    One function for `serve` and `daemon`: the check used to be written out twice, and
+    two copies of a security rule drift.
+    """
+    if _is_loopback(bind_host):
+        return
+    if cfg.api.token() is None:
+        _fail(
+            ValueError(
+                f"refusing to bind {bind_host} without a token: this API can start, "
+                f"stop, and delete things, and anyone able to reach the port could do "
+                f"so. Set {cfg.api.token_env} in the environment, or bind 127.0.0.1."
+            )
+        )
+    if not cfg.api.tls and not cfg.api.allow_plain_http:
+        _fail(
+            ValueError(
+                f"refusing to bind {bind_host} over plain HTTP: the token would cross "
+                f"the network in clear text on every request. Set `tls = true` under "
+                f"[api] — dzsm makes its own certificate — or `allow_plain_http = true` "
+                f"if nobody else can see this network."
+            )
+        )
+
+
+def _tls_for(cfg: Config, bind_host: str) -> Any:
+    """The certificate to serve with, or None when TLS is off.
+
+    Imported here rather than at the top: cryptography belongs to the web extra, and the
+    rest of the CLI must keep working without it.
+    """
+    if not cfg.api.tls:
+        return None
+    from dzsm import tls
+
+    try:
+        material = tls.ensure_certificate(cfg, bind_host)
+    except tls.TlsError as exc:
+        _fail(exc)
+    if material.generated:
+        typer.secho(
+            "made a new certificate — every PC that connects will warn once, and should "
+            "compare this fingerprint before accepting it:",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo(f"certificate fingerprint (SHA-256): {material.fingerprint}")
+    return material
+
+
+def _ssl_args(material: Any) -> dict[str, str]:
+    if material is None:
+        return {}
+    return {"ssl_certfile": str(material.cert_path), "ssl_keyfile": str(material.key_path)}
+
+
+def _url(host: str, port: int, material: Any) -> str:
+    scheme = "https" if material is not None else "http"
+    # 0.0.0.0 is not somewhere a browser can go; the local name is what works there.
+    shown = "localhost" if host in {"0.0.0.0", "::"} else host  # noqa: S104 - display only
+    return f"{scheme}://{shown}:{port}"
 
 
 def _is_loopback(host: str) -> bool:

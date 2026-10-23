@@ -96,6 +96,7 @@
 <div id="msg"></div>
 <div id="jobs"></div>
 <div id="c">loading&hellip;</div>
+<p class="note" id="fingerprint" style="word-break:break-all"></p>
 
 <p class="note" id="foot"></p>
 
@@ -1826,6 +1827,14 @@ async function load() {
             mods: mods || [], global: glob, updates: upd, steam: steam};
     jobs = jl || [];
     document.getElementById('root').textContent = health ? health.root : '';
+    // Where the comparison happens: the browser's certificate viewer shows the same
+    // string, and a match is what proves this page came from the server and not from
+    // something answering in its place. textContent, not innerHTML — it is data.
+    const fp = document.getElementById('fingerprint');
+    if (fp) {
+      fp.textContent = health && health.tls_fingerprint
+        ? 'certificate ' + health.tls_fingerprint : '';
+    }
 
     // Only repaint when something actually changed. Rebuilding the DOM on a timer wipes
     // whatever is being typed and can swallow a click that lands mid-refresh.
