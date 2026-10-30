@@ -9,13 +9,15 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from collections.abc import Callable, Collection
+import threading
+from collections.abc import Callable, Collection, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from dzsm.config import Config, LocalMod, WorkshopMod, is_bare_name
-from dzsm.state import State
+from dzsm.state import State, load_state
 
 _log = logging.getLogger(__name__)
 
@@ -198,6 +200,59 @@ def promote_snapshot(
         size / (1024 * 1024),
     )
     return destination
+
+
+_batches = 0
+_batches_lock = threading.Lock()
+
+
+@contextmanager
+def downloading() -> Iterator[None]:
+    """Mark a batch of mod downloads as in progress, for the length of the block.
+
+    An update restart must not land in the middle of a batch. Activation takes whatever
+    is cached at that moment, so restarting when the first mod of six has arrived puts
+    the server on one new version and five old ones. That happened live: COT landed,
+    the empty-server shortcut restarted at once, and NamantH's update finished eight
+    seconds too late, leaving every updated client kicked for a missing PBO.
+
+    In-process only. A `dzsm mods update` run in a terminal is not visible here; the
+    daemon is what downloads automatically, and the restart that follows it is the case
+    this exists for.
+    """
+    global _batches
+    with _batches_lock:
+        _batches += 1
+    try:
+        yield
+    finally:
+        with _batches_lock:
+            _batches -= 1
+
+
+def download_in_progress() -> bool:
+    """Whether a batch of mod downloads is running in this process. See downloading."""
+    with _batches_lock:
+        return _batches > 0
+
+
+def commit_promotion(config: Config, scratch: State, workshop_id: int, version: int) -> State:
+    """The state on disk, re-read now, with a promotion recorded in `scratch` folded in.
+
+    For a long-running download. Its caller used to hold one State for the whole batch
+    and save it after every mod, which wrote back a copy from minutes earlier each time —
+    so a restart the supervisor recorded meanwhile vanished. Live, that left state.json
+    describing a server process that had been replaced, on mod versions it no longer ran,
+    and the next update restart had nothing true to compare against.
+
+    So the slow part (copying files into the cache) runs against a scratch State, and
+    only this — read, add one record, save — touches the real one. The caller saves.
+    """
+    state = load_state(config.state_file)
+    record = scratch.versions[workshop_id][version]
+    state.versions.setdefault(workshop_id, {}).setdefault(version, record)
+    state.last_seen_remote[workshop_id] = version
+    return state
 
 
 def _tree_size(path: Path) -> int:

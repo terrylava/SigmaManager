@@ -245,9 +245,24 @@ def test_a_steam_failure_does_not_stop_the_loop(
     assert [j.status for j in jobs.all()] == ["failed", "failed"]
 
 
-def test_it_does_not_download_by_default(
+def test_it_downloads_by_default(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A found update that is only reported waits for someone to press a button, and a
+    server on the old version refuses every client that updated meanwhile."""
+    assert config.mod_check_auto_download is True
+    _seed(config)
+    monkeypatch.setattr(api, "check_updates", lambda ids: {CF: 100})
+    downloads: list[str] = []
+    monkeypatch.setattr(api, "_run_mod_update", lambda c, j, i: downloads.append(i))
+
+    api._auto_check(lambda: config, api.JobRegistry(), _Clock(passes=1))  # type: ignore[arg-type]
+
+    assert len(downloads) == 1
+
+
+def test_it_only_reports_when_told_to(
     config: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    config.mod_check_auto_download = False
     _seed(config)
     monkeypatch.setattr(api, "check_updates", lambda ids: {CF: 100})
     downloads: list[str] = []

@@ -233,6 +233,56 @@ nuisance, a server that fails to restart is an outage. The same applies to `stop
 escalates RCON `#shutdown` → terminate → kill; only the first flushes persistence
 properly, but none of them may block on RCON working.
 
+**Mod updates restart onto themselves.** The auto-check (every
+`mod_check_interval_minutes`, default 30) downloads what it finds
+(`mod_check_auto_download`, now **on** by default), and `runner.mod_restart_due` then
+gives each running instance a deadline `mod_update_grace_minutes` (30) after the first
+new version landed, warned with `rcon.mod_update_warning_message`. Activation is still
+only at start, so the new version is applied between the stop and the start. Three
+things not to undo:
+
+- **Update deadlines are recomputed every supervise pass**; only the ordinary schedule
+  is cached (recomputing a "04:00" entry at 04:00:10 rolls it to tomorrow). The whole
+  deadline used to be cached at the previous restart, so an update landing mid-run was
+  invisible — downloaded mods sat unused until some other restart came along.
+- **A rollback is recorded, not inferred** (`state.rolled_back_from`), and only that
+  version is skipped. An earlier "downloaded after the process started" rule also
+  skipped a version that landed seconds *before* a restart without being in it, which
+  stranded server1 on an old NamantH pack and kicked every updated client.
+- **An update restart waits for a download batch** (`mods.downloading()` around the
+  update job). Restarting when the first mod of a batch lands activates that one and
+  leaves the rest behind. Scheduled restarts do not wait.
+- **Long jobs never save a State they read at the start.** The update job used to, and
+  erased every restart the supervisor recorded during a download; state.json then
+  named a dead process, and the supervisor "crash restarted" a server that was up.
+  `mods.commit_promotion` re-reads, adds one record, and the caller saves.
+- **One instance's exception cannot end supervision** (`_supervise_one` is guarded).
+  Only dzsm's own errors were caught, so an OSError from a locked file killed the
+  supervisor thread for every instance, silently.
+- **The daemon logs to `root/logs/dzsm.log`** (rotated, 5 x 5 MB). Under a scheduled
+  task the console goes nowhere, so without it there was no log at all.
+- **A deadline noticed late gets a full grace period** (`runner._due`'s `noticed`), and so
+  does an instance adopted while already overdue (`runner._adopted`). Otherwise a download
+  made while the daemon was down restarts the server on first sight with no warning.
+
+**An empty server skips an update's grace period** (`update_restart_when_empty`, on).
+During a mod or game update countdown the supervisor asks RCON `players` once a minute
+and restarts at once on a definite 0. Unknown — RCON down, still in its startup grace,
+misconfigured — keeps the countdown: restarting a full server because it could not be
+asked is the failure to avoid. Scheduled restarts are never cut short; their time is
+someone's choice, while an update's wait exists only so players can log off.
+
+**The daemon supervises whatever is configured**, re-read each pass (`supervise(...,
+None)`). It used to capture the instance list at startup, so an instance added from the
+UI got no crash restarts, scheduled restarts or updates — one ran three days that way. A
+newly configured instance is adopted once it is running, never started behind
+someone's back; `--only` still means only.
+
+**The auto-check thread cannot die.** Each pass is wrapped in a catch-all, and
+`_run_mod_update` / `_run_server_update` always finish their job. Previously anything
+but SteamError ended the thread silently, and a job left "running" made every later pass
+skip as "already running" — the dashboard just kept showing an old check time.
+
 **Restarts have two sources**: `restart_schedule` (wall-clock) and `restart_after_hours`
 (uptime, **default 4**), whichever is sooner. The uptime deadline is recomputed after each
 restart so it counts from the new process. A down instance has no uptime deadline.

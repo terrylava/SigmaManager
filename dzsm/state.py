@@ -89,6 +89,10 @@ class State(BaseModel):
     # Consumed by that start. This is how a rollback actually takes effect, since
     # resolution otherwise always prefers the newest cached version.
     forced_versions: dict[str, dict[str, int]] = Field(default_factory=dict)
+    # instance name -> mod name -> the version a rollback moved it off. Kept so an update
+    # restart does not put the instance straight back on the version that just failed;
+    # a newer version than this one is a real update and still counts.
+    rolled_back_from: dict[str, dict[str, int]] = Field(default_factory=dict)
     # instance name -> the server build it activated at its last start. Separate from
     # `pins` because a build id is a string and a mod version is an int, and conflating
     # them would make both harder to reason about.

@@ -44,6 +44,7 @@ from dzsm.instance import (
 )
 from dzsm.mods import (
     ModCacheError,
+    download_in_progress,
     mod_paths,
     resolve_mod_versions,
     server_mod_paths,
@@ -377,16 +378,24 @@ def humanize(seconds: float) -> str:
 def supervise(
     config: Config,
     state: State,
-    instance_names: list[str],
+    instance_names: list[str] | None = None,
     *,
     stop: threading.Event | None = None,
     config_path: Path | None = None,
 ) -> None:
-    """Run the supervision loop: restart on crash and on schedule.
+    """Run the supervision loop: restart on crash, on schedule, and onto updates.
 
     Restart schedules are deliberately staggered across instances. Under this design that
     is a feature — two instances can run different versions of the same mod, so
     staggering no longer deadlocks updates the way it did in om.py (spec §2).
+
+    `instance_names` None means every configured instance, re-read from config on each
+    pass. That is what the daemon uses, and it has to be: the list used to be captured
+    once at startup, so an instance added from the web UI afterwards was never supervised
+    at all — no crash restarts, no scheduled restarts, no updates — while looking exactly
+    like the others on the dashboard. One ran for three days on stale mods that way. An
+    instance that appears mid-run is adopted once it is running; one that is merely
+    configured is not started behind someone's back.
 
     Runs until interrupted, or until `stop` is set — which is how the daemon shuts it
     down from another thread. State is saved after every transition so a crash of dzsm
@@ -394,22 +403,35 @@ def supervise(
     an instance started or stopped through the API is not clobbered by this loop's older
     in-memory copy.
     """
-    unknown = [name for name in instance_names if name not in config.instances]
+    follow = instance_names is None
+    names = list(config.instances) if instance_names is None else list(instance_names)
+    unknown = [name for name in names if name not in config.instances]
     if unknown:
         raise RunnerError(f"unknown instance(s): {', '.join(unknown)}")
-    if not instance_names:
+    if not names:
         raise RunnerError("no instances to supervise")
 
+    # The schedule is computed once per process and kept, not recomputed each pass: a
+    # "04:00" entry recomputed at 04:00:10 rolls over to tomorrow and never fires.
+    planned: dict[str, datetime | None] = {}
+    # When this loop first saw each update deadline, keyed (instance, kind). See _due.
+    noticed: dict[tuple[str, str], datetime] = {}
     due: dict[str, Due] = {}
     warned: dict[str, datetime] = {}
-    for name in instance_names:
+    # When each instance was last asked who is online, so an empty-server check during a
+    # countdown is one RCON login a minute rather than one every pass.
+    polled: dict[str, datetime] = {}
+    # Instances whose update restart is due but waiting on a download batch, so that is
+    # said once rather than every pass.
+    deferred: set[str] = set()
+    for name in names:
         if name in state.held:
             _log.info("instance %s: held down, not starting", name)
         elif not is_running(config, state, name):
             _start_and_save(config, state, name, reason="initial start")
-        due[name] = _due_at(config, state, name)
+        planned[name] = _adopted(config, _planned(config, state, name))
 
-    _log.info("supervising %s; Ctrl-C to stop", ", ".join(instance_names))
+    _log.info("supervising %s; Ctrl-C to stop", ", ".join(names))
     waiter = stop or threading.Event()
     try:
         while not waiter.is_set():
@@ -424,66 +446,168 @@ def supervise(
             # until the daemon restarted.
             if config_path is not None:
                 config = _reload_config(config_path, config)
+            if follow:
+                _follow_config(config, state, planned, due, warned)
 
-            for name in instance_names:
-                if name in state.held:
-                    # Deliberately down. Not a crash, not due a restart — leave it alone
-                    # until someone starts it.
-                    continue
-
-                scheduled = due[name].at
-                updating = due[name].update
-                if scheduled is not None and now >= scheduled:
-                    _log.info(
-                        "instance %s: %s restart",
+            for name in list(planned):
+                # Each instance in its own guard. Only dzsm's own errors used to be
+                # caught, so anything else — an OSError from a file the running
+                # server holds locked, say — came out through this loop and ended
+                # supervision for every instance at once, with nothing to show for
+                # it but a server that quietly stopped being restarted.
+                try:
+                    _supervise_one(
+                        config, state, name, now, planned, due, warned, polled,
+                        noticed, deferred,
+                    )
+                except Exception:
+                    _log.exception(
+                        "instance %s: supervision pass failed; trying again next pass",
                         name,
-                        "server build update" if updating else "scheduled",
                     )
-                    _warn_players(
-                        config, state, name, warned, remaining=0.0, final=True, update=updating
-                    )
-                    _restart_and_save(config, state, name)
-                    warned.pop(name, None)
-                    # Recomputed after the restart, so an uptime-based window starts
-                    # counting from the new process rather than the old one.
-                    due[name] = _due_at(config, state, name)
-                    continue
-
-                if scheduled is not None:
-                    # _warn_players decides which tier applies, or stays quiet.
-                    _warn_players(
-                        config,
-                        state,
-                        name,
-                        warned,
-                        remaining=(scheduled - now).total_seconds(),
-                        update=updating,
-                    )
-
-                if is_running(config, state, name):
-                    # Up, and up long enough to call it working: this run of failures is
-                    # over, and these are the versions to go back to if a later one
-                    # breaks it.
-                    _note_healthy(config, state, name)
-                    continue
-
-                if not _may_restart(config, state, name, now):
-                    continue
-
-                # Crash restart. Activation runs again here, so a mod that finished
-                # downloading since the last start is picked up now.
-                _log.warning("instance %s: process gone, restarting", name)
-                notify.post(
-                    config, "crash", f"**{name}** stopped unexpectedly. Restarting it."
-                )
-                _note_failure(config, state, name, "process gone")
-                _start_and_save(config, state, name, reason="crash restart")
-                warned.pop(name, None)
-                due[name] = _due_at(config, state, name)
     except KeyboardInterrupt:
         _log.info("supervision interrupted; leaving instances running")
     else:
         _log.info("supervision stopped; leaving instances running")
+
+
+def _supervise_one(
+    config: Config,
+    state: State,
+    name: str,
+    now: datetime,
+    planned: dict[str, datetime | None],
+    due: dict[str, Due],
+    warned: dict[str, datetime],
+    polled: dict[str, datetime],
+    noticed: dict[tuple[str, str], datetime],
+    deferred: set[str],
+) -> None:
+    """One supervision pass for one instance: update restarts, schedule, crash restart."""
+    if name in state.held:
+        # Deliberately down. Not a crash, not due a restart — leave it alone
+        # until someone starts it.
+        return
+
+    # Recomputed every pass, unlike the schedule: an update can arrive at any
+    # moment, and a deadline worked out at the last restart would never see
+    # it. That was the bug — a downloaded mod or build waited for whatever
+    # restart happened to come next, hours later.
+    due[name] = _due(config, state, name, planned[name], noticed, now)
+    scheduled = due[name].at
+    for_update = due[name].update or due[name].mods_update
+    batch = for_update and download_in_progress()
+    if (
+        scheduled is not None
+        and now < scheduled
+        and not batch
+        and _empty_for_update(config, state, name, due[name], polled, now)
+    ):
+        # The grace period exists for players to log off. With nobody on,
+        # it protects no one and only keeps the server refusing clients
+        # that have already updated.
+        _log.info(
+            "instance %s: nobody online, not waiting out the %s countdown",
+            name,
+            due[name].reason,
+        )
+        scheduled = now
+    if batch and scheduled is not None and now >= scheduled:
+        # Due, but mods are still downloading. Restarting now would activate
+        # part of the batch (see mods.downloading); the rest of it is moments
+        # away, and the warnings carry on meanwhile.
+        if name not in deferred:
+            _log.info(
+                "instance %s: %s restart is due; waiting for the mod "
+                "downloads in progress to finish",
+                name,
+                due[name].reason,
+            )
+            deferred.add(name)
+        scheduled = None
+    if scheduled is not None and now >= scheduled:
+        deferred.discard(name)
+        reason = due[name].reason
+        _log.info("instance %s: %s restart", name, reason)
+        _warn_players(
+            config,
+            state,
+            name,
+            warned,
+            remaining=0.0,
+            final=True,
+            update=due[name].update,
+            mods_update=due[name].mods_update,
+        )
+        _restart_and_save(config, state, name, reason=f"{reason} restart")
+        warned.pop(name, None)
+        polled.pop(name, None)
+        # Recomputed after the restart, so an uptime-based window starts
+        # counting from the new process rather than the old one.
+        planned[name] = _planned(config, state, name)
+        due.pop(name, None)
+        return
+
+    if scheduled is not None:
+        # _warn_players decides which tier applies, or stays quiet.
+        _warn_players(
+            config,
+            state,
+            name,
+            warned,
+            remaining=(scheduled - now).total_seconds(),
+            update=due[name].update,
+            mods_update=due[name].mods_update,
+        )
+
+    if is_running(config, state, name):
+        # Up, and up long enough to call it working: this run of failures is
+        # over, and these are the versions to go back to if a later one
+        # breaks it.
+        _note_healthy(config, state, name)
+        return
+
+    if not _may_restart(config, state, name, now):
+        return
+
+    # Crash restart. Activation runs again here, so a mod that finished
+    # downloading since the last start is picked up now.
+    _log.warning("instance %s: process gone, restarting", name)
+    notify.post(
+        config, "crash", f"**{name}** stopped unexpectedly. Restarting it."
+    )
+    _note_failure(config, state, name, "process gone")
+    _start_and_save(config, state, name, reason="crash restart")
+    warned.pop(name, None)
+    planned[name] = _planned(config, state, name)
+    due.pop(name, None)
+
+
+def _follow_config(
+    config: Config,
+    state: State,
+    planned: dict[str, datetime | None],
+    due: dict[str, Due],
+    warned: dict[str, datetime],
+) -> None:
+    """Supervise exactly the configured instances: adopt new ones, drop removed ones.
+
+    A new instance is adopted only once it is running. Starting one the moment it
+    appears in config would launch a server someone is still setting up; waiting for
+    them to press Start, then taking over its crash and update restarts, is what they
+    expect. Removing one drops it from supervision and leaves its process alone.
+    """
+    for name in list(planned):
+        if name not in config.instances:
+            _log.info("instance %s: removed from config, no longer supervised", name)
+            planned.pop(name, None)
+            due.pop(name, None)
+            warned.pop(name, None)
+    for name in config.instances:
+        if name in planned or not is_running(config, state, name):
+            continue
+        _log.info("instance %s: now supervised", name)
+        planned[name] = _adopted(config, _planned(config, state, name))
 
 
 def _reload_config(path: Path, current: Config) -> Config:
@@ -671,6 +795,7 @@ def _warn_players(
     remaining: float,
     final: bool = False,
     update: bool = False,
+    mods_update: bool = False,
 ) -> None:
     """Announce an incoming restart over RCON, as global admin chat (`say -1`).
 
@@ -678,7 +803,8 @@ def _warn_players(
     RCON port must never delay or prevent the restart itself (Rule 4). A failure is
     logged once per attempt and the loop carries on.
 
-    `update` picks the game-update wording over the routine-restart one.
+    `update` picks the game-update wording over the routine-restart one, and
+    `mods_update` the mod-update wording.
     """
     now = datetime.now()
     last = warned.get(instance_name)
@@ -694,9 +820,12 @@ def _warn_players(
     if rcon_grace_remaining(config, state, instance_name) > 0:
         return
 
-    template = (
-        config.rcon.update_warning_message if update else config.rcon.warning_message
-    )
+    if update:
+        template = config.rcon.update_warning_message
+    elif mods_update:
+        template = config.rcon.mod_update_warning_message
+    else:
+        template = config.rcon.warning_message
     message = template.format(remaining=humanize(remaining))
     try:
         client = rcon_client(config, instance_name)
@@ -813,6 +942,16 @@ class Due:
     # True when the soonest deadline is a newly downloaded server build rather than the
     # ordinary schedule.
     update: bool = False
+    # True when it is a newly downloaded mod version instead.
+    mods_update: bool = False
+
+    @property
+    def reason(self) -> str:
+        if self.update:
+            return "server build update"
+        if self.mods_update:
+            return "mod update"
+        return "scheduled"
 
 
 def build_restart_due(
@@ -849,18 +988,213 @@ def build_restart_due(
     return promoted + timedelta(minutes=grace)
 
 
-def _due_at(config: Config, state: State, instance_name: str) -> Due:
-    """When this instance is next due to restart, using its current process start time."""
+def mod_restart_due(config: Config, state: State, instance_name: str) -> datetime | None:
+    """When this running instance should restart onto mod versions downloaded since it
+    started, if ever.
+
+    Derived rather than stored, like build_restart_due, so it clears itself: the restart
+    pins the new versions, and then there is nothing newer than the pins.
+
+    Any cached version newer than the one running counts, except one a rollback moved
+    the instance off (`state.rolled_back_from`): after a rollback it runs older versions
+    on purpose, the one that failed is still the newest in the cache, and counting it
+    would restart straight back onto it. That is recorded rather than inferred. It used
+    to be inferred from "downloaded after this process started", which also excluded a
+    version that finished downloading seconds *before* a restart without being part of
+    it — exactly the version an update restart exists to pick up.
+
+    Returns None when the instance is not running (its next start picks up the newest
+    anyway), when it has no pins yet, or when resolution fails — an update deadline is
+    not the place to report a cache problem, the start that follows does that.
+    """
+    grace = config.mod_update_grace_minutes
+    if grace <= 0:
+        return None
     process = state.processes.get(instance_name)
-    scheduled = next_restart(
+    pins = state.pins.get(instance_name)
+    if process is None or not pins:
+        return None
+    try:
+        wanted = resolve_mod_versions(config, state, instance_name)
+    except ModCacheError:
+        return None
+
+    started = _local(process.started_at)
+    failed = state.rolled_back_from.get(instance_name, {})
+    arrivals: list[datetime] = []
+    for mod_name, version in wanted.items():
+        current = pins.get(mod_name)
+        # A mod newly added to the instance is not an update to anything; it waits for
+        # the next restart like any other config change.
+        if current is None or version <= current:
+            continue
+        mod = config.mods[mod_name]
+        if not isinstance(mod, WorkshopMod):
+            continue
+        # Every version between the running one and the target, not just the target: a
+        # mod updated twice in an hour must keep the countdown its first update started.
+        for candidate, record in state.versions.get(mod.workshop_id, {}).items():
+            if not current < candidate <= version:
+                continue
+            if candidate <= failed.get(mod_name, 0):
+                continue
+            arrived = _local(record.downloaded_at)
+            if arrived is None:
+                continue
+            # Counted from whichever is later: a version that landed before this process
+            # started has been waiting since then, not since its download.
+            arrivals.append(max(arrived, started) if started is not None else arrived)
+
+    if not arrivals:
+        return None
+    # The first arrival starts the countdown and later ones ride along: the restart picks
+    # up everything cached by then, and a countdown that jumped back each time another
+    # mod finished downloading would never reach zero on a busy update day.
+    return min(arrivals) + timedelta(minutes=grace)
+
+
+def due_at(config: Config, state: State, instance_name: str) -> Due:
+    """When this instance is next due to restart, and why.
+
+    The stateless form, for reporting. The supervisor uses _due, which also guarantees
+    players a full warning for an update it only noticed late.
+    """
+    return _soonest(
+        _planned(config, state, instance_name),
+        build_restart_due(config, state, instance_name),
+        mod_restart_due(config, state, instance_name),
+    )
+
+
+# Kept for the tests and callers written against the old name.
+_due_at = due_at
+
+
+def _planned(config: Config, state: State, instance_name: str) -> datetime | None:
+    """The ordinary schedule, from the current process start time."""
+    process = state.processes.get(instance_name)
+    return next_restart(
         config.instances[instance_name],
         started_at=process.started_at if process else None,
     )
-    update = build_restart_due(config, state, instance_name)
 
-    if update is not None and (scheduled is None or update <= scheduled):
-        return Due(at=update, update=True)
-    return Due(at=scheduled)
+
+# How often, during an update countdown, to ask a server whether anyone is still on.
+EMPTY_CHECK_SECONDS = 60
+
+
+def _empty_for_update(
+    config: Config,
+    state: State,
+    instance_name: str,
+    due: Due,
+    polled: dict[str, datetime],
+    now: datetime,
+) -> bool:
+    """True when an update countdown can be cut short because nobody is online.
+
+    Update restarts only: a scheduled restart's time is somebody's deliberate choice,
+    while an update's grace period exists purely so players can log off.
+
+    Only an affirmative answer of zero counts. RCON unreachable, misconfigured or still
+    starting up all mean "unknown", and unknown keeps the countdown — restarting a full
+    server because RCON was down is far worse than waiting out a grace period on an
+    empty one.
+    """
+    if not config.update_restart_when_empty:
+        return False
+    if not (due.update or due.mods_update):
+        return False
+    last = polled.get(instance_name)
+    if last is not None and (now - last).total_seconds() < EMPTY_CHECK_SECONDS:
+        return False
+    polled[instance_name] = now
+    return players_online(config, state, instance_name) == 0
+
+
+def players_online(config: Config, state: State, instance_name: str) -> int | None:
+    """How many players are on this instance, or None when that cannot be found out.
+
+    Counts every slot BattlEye reports, including players still loading in: someone
+    mid-connect is about to be playing. Never raises.
+    """
+    if rcon_grace_remaining(config, state, instance_name) > 0:
+        return None
+    try:
+        client = rcon_client(config, instance_name)
+    except RconError as exc:
+        _log.warning("instance %s: cannot ask who is online: %s", instance_name, exc)
+        return None
+    if client is None:
+        return None
+    try:
+        return len(client.players())
+    except RconError as exc:
+        _log.warning("instance %s: cannot ask who is online: %s", instance_name, exc)
+        return None
+    finally:
+        client.close()
+
+
+def _adopted(config: Config, planned: datetime | None) -> datetime | None:
+    """The schedule for an instance this loop has just taken over.
+
+    One that is already overdue — it ran unsupervised, or past its window while the
+    daemon was down — gets a full warning countdown rather than a restart on the first
+    pass. Restarting the moment it is noticed would throw everyone out with no warning,
+    which is the one thing every other restart path here is built to avoid.
+    """
+    now = datetime.now()
+    if planned is not None and planned <= now:
+        return now + timedelta(seconds=config.rcon.early_warning_lead_seconds)
+    return planned
+
+
+def _due(
+    config: Config,
+    state: State,
+    instance_name: str,
+    planned: datetime | None,
+    noticed: dict[tuple[str, str], datetime],
+    now: datetime,
+) -> Due:
+    """The supervisor's deadline: the schedule, or an update, whichever is sooner.
+
+    An update deadline is never sooner than a full grace period after this loop first
+    saw it. A derived deadline counts from the download, so one that happened while the
+    daemon was down — or before this fix, while the instance was unsupervised — would
+    otherwise already be in the past, and the server would restart the moment it was
+    noticed with no warning at all.
+    """
+    found: dict[str, datetime | None] = {
+        "build": build_restart_due(config, state, instance_name),
+        "mods": mod_restart_due(config, state, instance_name),
+    }
+    graces = {
+        "build": config.server_update_grace_minutes,
+        "mods": config.mod_update_grace_minutes,
+    }
+    for kind, at in found.items():
+        key = (instance_name, kind)
+        if at is None:
+            noticed.pop(key, None)
+            continue
+        first = noticed.setdefault(key, now)
+        found[kind] = max(at, first + timedelta(minutes=graces[kind]))
+    return _soonest(planned, found["build"], found["mods"])
+
+
+def _soonest(
+    planned: datetime | None, build: datetime | None, mods: datetime | None
+) -> Due:
+    """The earliest deadline. A tie goes to the update, since that is the wording players
+    are owed."""
+    best = Due(at=planned)
+    if mods is not None and (best.at is None or mods <= best.at):
+        best = Due(at=mods, mods_update=True)
+    if build is not None and (best.at is None or build <= best.at):
+        best = Due(at=build, update=True)
+    return best
 
 
 def _request_shutdown(config: Config, state: State, instance_name: str) -> bool:
@@ -1079,6 +1413,9 @@ def _roll_back(config: Config, state: State, instance_name: str) -> None:
         f"versions it last stayed up on: `{summary}`",
     )
     state.forced_versions[instance_name] = dict(good)
+    state.rolled_back_from[instance_name] = {
+        name: was for name, (was, _) in changed.items() if was is not None
+    }
 
 
 def _note_healthy(config: Config, state: State, instance_name: str) -> None:
@@ -1126,14 +1463,16 @@ def _start_and_save(config: Config, state: State, instance_name: str, *, reason:
         _save(config, state)
 
 
-def _restart_and_save(config: Config, state: State, instance_name: str) -> None:
+def _restart_and_save(
+    config: Config, state: State, instance_name: str, *, reason: str = "scheduled restart"
+) -> None:
     try:
         # hold=False: this stop is one half of a restart, not a request to stay down.
         stop(config, state, instance_name, hold=False)
     except (RunnerError, psutil.Error) as exc:
         _log.error("instance %s: stop failed during restart: %s", instance_name, exc)
     _backup_between(config, state, instance_name)
-    _start_and_save(config, state, instance_name, reason="scheduled restart")
+    _start_and_save(config, state, instance_name, reason=reason)
 
 
 def _backup_between(config: Config, state: State, instance_name: str) -> None:

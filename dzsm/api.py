@@ -54,7 +54,9 @@ from dzsm.config import Config, WorkshopMod, load_config
 from dzsm.instance import DEFAULT_TERRAIN, InstanceError, prune_logs
 from dzsm.mods import (
     ModCacheError,
+    commit_promotion,
     delete_version,
+    downloading,
     local_copy,
     promote_snapshot,
     promote_tree,
@@ -308,45 +310,62 @@ def _auto_check(
             _log.info("auto-check: an update is already running, skipping this pass")
             continue
 
-        job = jobs.create("mods.check")
+        # Everything in a pass, caught. Only SteamError used to be, so anything else —
+        # a full disk, a network error httpx raised past the wrapper, a bug in one of the
+        # housekeeping steps — ended this thread for good. Nothing reports a dead thread:
+        # the dashboard just went on showing the last check time, and updates stopped.
         try:
-            found = _check_and_record(config)
-        except SteamError as exc:
-            _log.error("auto-check failed: %s", exc)
-            jobs.finish(job.id, ok=False, detail=str(exc))
-            continue
+            _auto_check_pass(config, jobs)
+        except Exception:
+            _log.exception("auto-check: this pass failed; trying again in %s min", interval)
 
-        detail = (
-            f"{len(found)} update(s) available: {', '.join(sorted(found))}"
-            if found
-            else "everything up to date"
-        )
-        jobs.finish(job.id, ok=True, detail=detail)
 
-        if found and config.mod_check_auto_download:
-            download = jobs.create("mods.update")
-            _run_mod_update(config, jobs, download.id)
+def _auto_check_pass(config: Config, jobs: JobRegistry) -> None:
+    """One pass of the automatic checks. See _auto_check."""
+    job = jobs.create("mods.check")
+    try:
+        found = _check_and_record(config)
+    except SteamError as exc:
+        _log.error("auto-check failed: %s", exc)
+        jobs.finish(job.id, ok=False, detail=str(exc))
+        return
+    except Exception as exc:
+        # Finished before re-raising: a job left "running" makes every later pass skip
+        # with "an update is already running", which is a dead checker by another name.
+        jobs.finish(job.id, ok=False, detail=f"check failed: {exc}")
+        raise
 
-        # Separate from the mod check and deliberately after it: this one costs a steamcmd
-        # run and needs a working session, so a broken sentry must not stop mods being
-        # checked over the Web API, which needs neither.
-        if config.check_server_build:
-            _check_server_build(config, jobs)
+    detail = (
+        f"{len(found)} update(s) available: {', '.join(sorted(found))}"
+        if found
+        else "everything up to date"
+    )
+    jobs.finish(job.id, ok=True, detail=detail)
 
-        # Last, and never fatal: this one talks to GitHub rather than Steam, so it
-        # must not be able to stop the checks people actually depend on.
-        if config.check_for_updates:
-            _check_for_release(config)
+    if found and config.mod_check_auto_download:
+        download = jobs.create("mods.update")
+        _run_mod_update(config, jobs, download.id)
 
-        # Folded into the same housekeeping tick rather than the supervision loop: the
-        # open admin log grows continuously while anyone is connected, and re-parsing it
-        # every 15s to learn nothing would be pure waste.
-        _ingest_sessions(config)
+    # Separate from the mod check and deliberately after it: this one costs a steamcmd
+    # run and needs a working session, so a broken sentry must not stop mods being
+    # checked over the Web API, which needs neither.
+    if config.check_server_build:
+        _check_server_build(config, jobs)
 
-        # Strictly after the ingest above, never before: the .ADM files are what the
-        # player ledger is built from, so pruning them first would delete sessions that
-        # had never been read.
-        _prune_logs(config)
+    # Last, and never fatal: this one talks to GitHub rather than Steam, so it
+    # must not be able to stop the checks people actually depend on.
+    if config.check_for_updates:
+        _check_for_release(config)
+
+    # Folded into the same housekeeping tick rather than the supervision loop: the
+    # open admin log grows continuously while anyone is connected, and re-parsing it
+    # every 15s to learn nothing would be pure waste.
+    _ingest_sessions(config)
+
+    # Strictly after the ingest above, never before: the .ADM files are what the
+    # player ledger is built from, so pruning them first would delete sessions that
+    # had never been read.
+    _prune_logs(config)
 
 
 def _prune_logs(config: Config) -> int:
@@ -819,10 +838,10 @@ def create_app(config_path: Path) -> FastAPI:
         state = current_state()
         result = []
         for name, instance in config.instances.items():
-            process = state.processes.get(name)
-            upcoming = runner.next_restart(
-                instance, started_at=process.started_at if process else None
-            )
+            # The supervisor's own answer, not just the schedule: an instance counting
+            # down onto a mod or game update restarts long before its routine time.
+            upcoming_due = runner.due_at(config, state, name)
+            upcoming = upcoming_due.at
             result.append(
                 {
                     "name": name,
@@ -854,6 +873,7 @@ def create_app(config_path: Path) -> FastAPI:
                     "server_build_pin": instance.server_build,
                     "isolated_server": instance.isolated_server,
                     "next_restart": upcoming.isoformat() if upcoming else None,
+                    "next_restart_reason": upcoming_due.reason if upcoming else None,
                 }
             )
         return result
@@ -1343,6 +1363,13 @@ def create_app(config_path: Path) -> FastAPI:
             },
             "auto_download": config.mod_check_auto_download,
             "available": sorted(behind),
+            "grace_minutes": config.mod_update_grace_minutes,
+            # Instances that will restart onto newly downloaded mod versions, and when.
+            "restarting": {
+                name: due.isoformat()
+                for name in config.instances
+                if (due := runner.mod_restart_due(config, state, name)) is not None
+            },
             "server": {
                 "checking": config.check_server_build,
                 "installed": running_build,
@@ -2180,7 +2207,20 @@ def _note_steam_session(config: Config, state: State, exc: Exception | None) -> 
 
 
 def _run_mod_update(config: Config, jobs: JobRegistry, job_id: str) -> None:
-    """Body of the mods.update job. Mirrors `dzsm mods update` exactly."""
+    """Body of the mods.update job. Mirrors `dzsm mods update` exactly.
+
+    Always finishes the job, whatever goes wrong. One left "running" blocks every
+    automatic check after it, since a check never starts on top of an update.
+    """
+    try:
+        with downloading():
+            _mod_update_body(config, jobs, job_id)
+    except Exception as exc:
+        _log.exception("api: mod update failed unexpectedly")
+        jobs.finish(job_id, ok=False, detail=f"update failed: {exc}")
+
+
+def _mod_update_body(config: Config, jobs: JobRegistry, job_id: str) -> None:
     state = load_state(config.state_file)
     workshop = {name: mod for name, mod in config.mods.items() if isinstance(mod, WorkshopMod)}
     lines: list[str] = []
@@ -2206,26 +2246,38 @@ def _run_mod_update(config: Config, jobs: JobRegistry, job_id: str) -> None:
         try:
             result = download_mod(config, mod.workshop_id)
             verify_download(config, result)
-            promote_snapshot(config, state, mod.workshop_id, latest)
-            state.last_seen_remote[mod.workshop_id] = latest
-            lines.append(f"{name}: promoted {latest}")
-            # A completed download is proof the cached session works, so the dashboard
-            # never has to ask for a check it already has the answer to.
-            _note_steam_session(config, state, None)
+            # Against a scratch State: the download took minutes, and the state read at
+            # the top of this job is out of date by now. See commit_promotion.
+            promote_snapshot(config, scratch := State(), mod.workshop_id, latest)
         except (SteamError, ModCacheError) as exc:
             # One broken mod must not stop the batch (Rule 3).
             _log.error("api: mod %s (%s) failed: %s", name, mod.workshop_id, exc)
             lines.append(f"{name}: FAILED {exc}")
             failures += 1
+            state = load_state(config.state_file)
             _note_steam_session(config, state, exc)
-        finally:
             save_state(config.state_file, state)
+            continue
+        state = commit_promotion(config, scratch, mod.workshop_id, latest)
+        # A completed download is proof the cached session works, so the dashboard
+        # never has to ask for a check it already has the answer to.
+        _note_steam_session(config, state, None)
+        save_state(config.state_file, state)
+        lines.append(f"{name}: promoted {latest}")
 
     jobs.finish(job_id, ok=failures == 0, detail="\n".join(lines) or "nothing to do")
 
 
 def _run_server_update(config: Config, jobs: JobRegistry, job_id: str, validate: bool) -> None:
-    """Body of the server.update job."""
+    """Body of the server.update job. Always finishes it — see _run_mod_update."""
+    try:
+        _server_update_body(config, jobs, job_id, validate)
+    except Exception as exc:
+        _log.exception("api: server update failed unexpectedly")
+        jobs.finish(job_id, ok=False, detail=f"update failed: {exc}")
+
+
+def _server_update_body(config: Config, jobs: JobRegistry, job_id: str, validate: bool) -> None:
     try:
         build_id = update_server_app(config, validate=validate)
     except SteamError as exc:

@@ -267,6 +267,8 @@ class RconConfig(BaseModel):
     # wording: players whose client just updated and cannot connect are owed the reason,
     # and "server restart" reads like the routine one they can wait out.
     update_warning_message: str = "Game update - server restarting in {remaining}"
+    # Used when the restart is to pick up a downloaded mod update.
+    mod_update_warning_message: str = "Mod update - server restarting in {remaining}"
     # Stop servers with RCON's #shutdown rather than signalling the process, so DayZ
     # closes down on its own terms and flushes persistence. Falls back to terminate then
     # kill if it does not exit.
@@ -516,9 +518,23 @@ class Config(BaseModel):
     mod_check_interval_minutes: int = 30
     # Download what the check found, rather than only reporting it. Safe to leave on:
     # downloading is decoupled from activation (spec §2), so a new version lands in the
-    # cache and is not used by anything until an instance next starts. Off by default
-    # anyway — it spends bandwidth and disk without being asked.
-    mod_check_auto_download: bool = False
+    # cache and is not used by anything until an instance next restarts. On by default:
+    # a server left on an old mod version stops accepting the clients that updated it.
+    mod_check_auto_download: bool = True
+    # Once a newer mod version is downloaded, restart the running instances that use it
+    # after this many minutes, warning players over RCON meanwhile. 0 leaves it to the
+    # normal restart schedule.
+    #
+    # Same reasoning as server_update_grace_minutes: clients pull the new version from
+    # the Workshop on their own, and a server still on the old one refuses them, so
+    # waiting hours for a scheduled restart is an outage. 30 matches the default early
+    # warning lead, so players get the full countdown.
+    mod_update_grace_minutes: int = 30
+    # Skip an update's grace period when nobody is online — mod or game update alike.
+    # The grace period is for players to log off; with none on, it only keeps the server
+    # refusing updated clients. Checked over RCON once a minute during the countdown,
+    # and only a definite "0 players" counts: RCON being unreachable keeps the countdown.
+    update_restart_when_empty: bool = True
     # Also ask Steam whether the *server app* has a new build, on the same interval. This
     # is the one that matters most and is easiest to miss: when DayZ updates, clients
     # update themselves and a server left on the old build stops accepting them entirely.
@@ -765,6 +781,16 @@ class Config(BaseModel):
             raise ValueError(
                 f"server_update_grace_minutes cannot be negative, got {v}. Use 0 to leave "
                 f"a new build to the normal restart schedule."
+            )
+        return v
+
+    @field_validator("mod_update_grace_minutes")
+    @classmethod
+    def _mod_grace_cannot_be_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"mod_update_grace_minutes cannot be negative, got {v}. Use 0 to leave "
+                f"a mod update to the normal restart schedule."
             )
         return v
 

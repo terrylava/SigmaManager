@@ -96,6 +96,8 @@ EDITABLE_GLOBAL_FIELDS = frozenset(
         "check_server_build",
         "server_update_auto_download",
         "server_update_grace_minutes",
+        "mod_update_grace_minutes",
+        "update_restart_when_empty",
         "allow_long_root",
         "api.host",
         "api.port",

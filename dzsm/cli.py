@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import logging.handlers
 import threading
 import webbrowser
 from pathlib import Path
@@ -24,6 +25,7 @@ from dzsm.mods import (
     ModCacheError,
     UnusedMod,
     collect_garbage,
+    commit_promotion,
     delete_version,
     promote_snapshot,
     promote_tree,
@@ -307,6 +309,7 @@ def serve(
     bind_port = port or cfg.api.port
 
     _check_bind(cfg, bind_host)
+    _log_to_file(cfg)
     uvicorn, create_app = _web_dependencies(cfg)
     tls = _tls_for(cfg, bind_host)
 
@@ -394,13 +397,14 @@ def daemon(
     if unknown:
         _fail(ValueError(f"unknown instance(s): {', '.join(unknown)}"))
     _check_bind(cfg, bind_host)
+    _log_to_file(cfg)
     uvicorn, create_app = _web_dependencies(cfg)
     tls = _tls_for(cfg, bind_host)
 
     stop = threading.Event()
     supervisor = threading.Thread(
         target=runner.supervise,
-        args=(cfg, state, names),
+        args=(cfg, state, only or None),
         kwargs={"stop": stop, "config_path": config_path},
         name="dzsm-supervisor",
         daemon=True,
@@ -461,6 +465,42 @@ def _web_dependencies(cfg: Config) -> tuple[Any, Any]:
             )
         )
     return uvicorn, create_app
+
+
+# Rotated rather than kept forever: the daemon logs every restart and warning, and an
+# unattended server runs for months.
+LOG_FILE_BYTES = 5 * 1024 * 1024
+LOG_FILE_BACKUPS = 5
+
+
+def _log_to_file(cfg: Config) -> None:
+    """Also log to root/logs/dzsm.log, for the long-running commands.
+
+    Run as a scheduled task, the daemon's console goes nowhere, so its log did too —
+    and Rule 3 ("fail loudly") means nothing if the loud part is written to a console
+    nobody has. A kick that turned out to be a supervisor thread dying, a restart in the
+    middle of a download batch and a state file overwritten from a stale copy all had to
+    be reconstructed from file timestamps, because there was no log to read.
+
+    Never fatal: a server manager that will not start because it cannot open its log
+    file is worse than one that logs to the console only.
+    """
+    path = cfg.root / "logs" / "dzsm.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILE_BACKUPS, encoding="utf-8"
+        )
+    except OSError as exc:
+        typer.secho(f"cannot write a log file at {path}: {exc}", fg=typer.colors.YELLOW)
+        return
+    # Timestamps here, unlike the console: a file is read after the fact, and "when" is
+    # most of the question.
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)-7s %(threadName)s %(message)s")
+    )
+    logging.getLogger().addHandler(handler)
+    typer.echo(f"logging to {path}")
 
 
 def _check_bind(cfg: Config, bind_host: str) -> None:
@@ -626,19 +666,19 @@ def mods_update(
         try:
             result = download_mod(cfg, mod.workshop_id)
             verify_download(cfg, result)
-            path = promote_snapshot(cfg, state, mod.workshop_id, latest)
+            # Against a scratch State, then folded into a fresh read: a daemon in another
+            # process may have started or restarted servers while this downloaded, and
+            # saving the copy read at the top would erase that. See commit_promotion.
+            path = promote_snapshot(cfg, scratch := State(), mod.workshop_id, latest)
         except (SteamError, ModCacheError) as exc:
             # Keep going: one broken mod must not stop the rest of the batch. The
             # failure is recorded here and in the exit code, never swallowed (Rule 3).
             typer.secho(f"{name} ({mod.workshop_id}): {exc}", fg=typer.colors.RED, err=True)
             failures += 1
             continue
-        finally:
-            # State is saved even on failure — a promotion that succeeded before a later
-            # mod broke must not be forgotten.
-            _save_state(cfg, state)
 
-        state.last_seen_remote[mod.workshop_id] = latest
+        # Saved per mod, so a promotion that succeeded before a later mod broke is kept.
+        state = commit_promotion(cfg, scratch, mod.workshop_id, latest)
         _save_state(cfg, state)
         typer.secho(f"{name}: promoted {latest} -> {path}", fg=typer.colors.GREEN)
 
